@@ -1,17 +1,19 @@
 import express from "express";
 import { registerAccount, loginAccount, logoutAccount, getProfile, updatePassword} from "../controller/authController.js";
+import { validateLogin, validateRegister } from "../middleware/validateRequest.js";
+import authenticate from "../middleware/authenticate.js";
 
 const router = express.Router();
 
-router.post("/register", registerAccount);
+router.post("/register", validateRegister, registerAccount);
 
-router.post("/login", loginAccount);
+router.post("/login", validateLogin, loginAccount);
 
 router.post("/logout", logoutAccount);
 
-router.get("/me/:id", getProfile);
+router.get("/me", authenticate, getProfile);
 
-router.put("/change-password/:id", updatePassword);
+router.put("/change-password/", authenticate, updatePassword);
 
 
 export default router;
