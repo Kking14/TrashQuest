@@ -14,7 +14,7 @@ const getUserById = async (userID) => {
 }
 
 const updateUser = async (userID, updateData) => {
-    const user = await User.findByIdAndUpdate(userID, updateData, { new: true }).select('-password');
+    const user = await User.findByIdAndUpdate(userID, {...updateData }, { new: true }).select('-password');
     if (!user) {
         throw new Error('User not found');
     }
