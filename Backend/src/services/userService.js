@@ -22,7 +22,7 @@ const updateUser = async (userID, updateData) => {
 }
 
 const deleteUser = async (userID) => {
-    const user = await User.findByIdAndDelete(
+    const user = await User.findByIdAndUpdate(
         userID,
         { status: 'inactive' },
         { new: true }

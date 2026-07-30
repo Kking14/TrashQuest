@@ -1,5 +1,3 @@
-import { model } from "mongoose";
-
 const validateRegister = (req, res, next) => {
     const { name, email, password } = req.body;
     const errors = [];
