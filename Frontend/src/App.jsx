@@ -25,6 +25,22 @@ function estimatePoints(wasteType, grams) {
   return Math.round(rate * (grams / 1000));
 }
 
+function getPasswordStrength(password) {
+  const checks = [
+    password.length >= 8,
+    password.length >= 12,
+    /[a-z]/.test(password) && /[A-Z]/.test(password),
+    /\d/.test(password),
+    /[^A-Za-z0-9]/.test(password),
+  ];
+  const score = checks.filter(Boolean).length;
+  if (!password) return { score: 0, label: 'Enter a password', tone: 'empty' };
+  if (score <= 2) return { score, label: 'Weak', tone: 'weak' };
+  if (score <= 3) return { score, label: 'Fair', tone: 'fair' };
+  if (score === 4) return { score, label: 'Strong', tone: 'strong' };
+  return { score, label: 'Very strong', tone: 'very-strong' };
+}
+
 async function apiRequest(path, { method = 'GET', token, body, headers = {} } = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     method,
@@ -90,8 +106,8 @@ function App() {
     ];
 
     if (isAdmin) {
-      requests.push(['users', apiRequest('/api/users', { token })]);
-      requests.push(['logs', apiRequest('/api/disposals', { token })]);
+      requests.push(['users', apiRequest('/api/users?limit=500&sortBy=name&sortOrder=asc', { token })]);
+      requests.push(['logs', apiRequest('/api/disposals?limit=500', { token })]);
     }
 
     const results = await Promise.allSettled(requests.map(([, request]) => request));
@@ -188,11 +204,18 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
   const [mode, setMode] = useState('login');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
+  const [registrationPassword, setRegistrationPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const passwordStrength = getPasswordStrength(registrationPassword);
 
   async function handleSubmit(event) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const body = Object.fromEntries(form.entries());
+    if (mode === 'register' && registrationPassword !== confirmPassword) {
+      setNotice('Passwords do not match.');
+      return;
+    }
     setBusy(true);
     setNotice('');
 
@@ -203,6 +226,8 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
       } else {
         setNotice('Account created. You can sign in now.');
         setMode('login');
+        setRegistrationPassword('');
+        setConfirmPassword('');
         event.currentTarget.reset();
       }
     } catch (error) {
@@ -216,19 +241,36 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
     <main className="auth-page">
       <section className="auth-panel">
         <div className="auth-copy">
-          <p className="eyebrow">TrashQuest</p>
+          <div className="landing-art" aria-hidden="true">
+            <span>♻</span>
+            <i />
+            <i />
+            <i />
+          </div>
+          <div className="landing-brand"><span>TQ</span><strong>TrashQuest</strong></div>
+          <p className="eyebrow landing-kicker">Smart recycling for every barangay</p>
           <h1>Scan the bin screen. Claim your points.</h1>
           <p>
-            Residents use the phone dashboard to scan a QR token from the smart bin.
-            Admins manage bins, quests, rewards, and station testing.
+            Turn everyday waste into community rewards. Drop accepted recyclables,
+            scan your session, and earn points while helping keep your barangay clean.
           </p>
+          <div className="landing-features" aria-label="Accepted materials">
+            <span>🥤 Plastic bottles</span>
+            <span>🥫 Tin cans</span>
+            <span>📄 Paper</span>
+          </div>
           <button type="button" className="secondary-button bin-entry-button" onClick={onOpenBinDisplay}>
-            Open bin dashboard
+            Open station display
           </button>
-          <p className="admin-entry-note">Admin only — password required to access the bin touch display.</p>
+          <p className="admin-entry-note">For authorized TrashQuest station screens.</p>
         </div>
 
         <form className="auth-form" onSubmit={handleSubmit}>
+          <div className="auth-form-heading">
+            <p className="eyebrow">Resident portal</p>
+            <h2>{mode === 'login' ? 'Welcome back' : 'Create your account'}</h2>
+            <p>{mode === 'login' ? 'Sign in to view your points and quests.' : 'Register to start earning rewards for recycling.'}</p>
+          </div>
           <div className="segmented">
             <button type="button" className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}>
               Login
@@ -239,10 +281,20 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
           </div>
 
           {mode === 'register' && (
-            <label>
-              Name
-              <input name="name" placeholder="Juan Dela Cruz" required />
-            </label>
+            <div className="registration-name-grid">
+              <label>
+                Last name
+                <input name="lastName" placeholder="Dela Cruz" autoComplete="family-name" required />
+              </label>
+              <label>
+                First name
+                <input name="firstName" placeholder="Juan" autoComplete="given-name" required />
+              </label>
+              <label>
+                MI
+                <input name="middleInitial" placeholder="—" maxLength="1" autoComplete="additional-name" aria-label="Middle initial (optional)" />
+              </label>
+            </div>
           )}
 
           <label>
@@ -251,8 +303,49 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
           </label>
           <label>
             Password
-            <input name="password" type="password" minLength={6} placeholder="At least 6 characters" required />
+            {mode === 'register' ? (
+              <>
+                <input
+                  name="password"
+                  type="password"
+                  minLength={8}
+                  value={registrationPassword}
+                  onChange={(event) => setRegistrationPassword(event.target.value)}
+                  placeholder="At least 8 characters"
+                  autoComplete="new-password"
+                  required
+                />
+                <div className={`password-strength ${passwordStrength.tone}`}>
+                  <div>{[1, 2, 3, 4, 5].map((step) => <i key={step} className={step <= passwordStrength.score ? 'filled' : ''} />)}</div>
+                  <span>{passwordStrength.label}</span>
+                </div>
+                <small className="password-hint">Use uppercase, lowercase, a number, and preferably a symbol.</small>
+              </>
+            ) : (
+              <input name="password" type="password" placeholder="Your password" autoComplete="current-password" required />
+            )}
           </label>
+
+          {mode === 'register' && (
+            <label>
+              Confirm password
+              <input
+                name="confirmPassword"
+                type="password"
+                minLength={8}
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                placeholder="Type your password again"
+                autoComplete="new-password"
+                required
+              />
+              {confirmPassword && (
+                <small className={registrationPassword === confirmPassword ? 'password-match valid' : 'password-match invalid'}>
+                  {registrationPassword === confirmPassword ? 'Passwords match' : 'Passwords do not match'}
+                </small>
+              )}
+            </label>
+          )}
 
           {notice && <div className="notice compact">{notice}</div>}
           <button type="submit" className="primary-button" disabled={busy}>
@@ -274,6 +367,9 @@ function BinDisplayDashboard({ onExit }) {
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const [claim, setClaim] = useState(null);
+  const [displayState, setDisplayState] = useState('ready');
+  const [detectedItem, setDetectedItem] = useState(null);
+  const detectionTimer = useRef(null);
 
   const totalGrams = items.reduce((sum, item) => sum + item.grams, 0);
   const groupedItems = binWasteOptions.map((option) => ({
@@ -286,6 +382,34 @@ function BinDisplayDashboard({ onExit }) {
     (sum, item) => sum + estimatePoints(item.value, item.grams),
     0
   );
+
+  useEffect(() => () => clearTimeout(detectionTimer.current), []);
+
+  // Temporary test controls call this now. Later, the hardware bridge can call
+  // this same function with the YOLO/sensor result and measured weight.
+  function handleWasteDetected(wasteType, detectedGrams) {
+    if (displayState === 'detecting' || displayState === 'qr') return;
+    const option = binWasteOptions.find((entry) => entry.value === wasteType);
+    const normalizedGrams = Math.max(1, Math.round(Number(detectedGrams) || 100));
+    setClaim(null);
+    setNotice('');
+    setDetectedItem({ ...option, grams: normalizedGrams });
+    setDisplayState('detecting');
+    clearTimeout(detectionTimer.current);
+    detectionTimer.current = setTimeout(() => {
+      setItems((currentItems) => [
+        ...currentItems,
+        { id: crypto.randomUUID(), wasteType, grams: normalizedGrams },
+      ]);
+      setDisplayState('recognized');
+    }, 900);
+  }
+
+  function waitForNextItem() {
+    setDetectedItem(null);
+    setDisplayState('ready');
+    setNotice('');
+  }
 
   function unlock(event) {
     event.preventDefault();
@@ -333,6 +457,8 @@ function BinDisplayDashboard({ onExit }) {
   function clearSession() {
     setItems([]);
     setClaim(null);
+    setDetectedItem(null);
+    setDisplayState('ready');
     setNotice('');
   }
 
@@ -341,59 +467,80 @@ function BinDisplayDashboard({ onExit }) {
   }
 
   async function finishSession() {
-    if (!deviceKey.trim()) {
-      setNotice('Enter this bin display device API key first.');
-      return;
-    }
     if (items.length === 0) {
       setNotice('Add at least one waste item before generating a QR code.');
       return;
     }
 
     setBusy(true);
+    setDisplayState('qr');
     setNotice('');
     try {
       const claims = [];
       for (const group of groupedItems) {
-        const response = await apiRequest('/api/disposals/claims', {
-          method: 'POST',
-          headers: { 'x-device-key': deviceKey.trim() },
-          body: {
-            wasteType: group.value,
-            quantity: group.grams / 1000,
-          },
-        });
-        const qrValue = response.data.claimToken;
-        const qrImage = await QRCode.toDataURL(qrValue, {
-          margin: 2,
-          width: 360,
-          color: {
-            dark: '#10221c',
-            light: '#ffffff',
-          },
-        });
+        let claimData;
+        if (deviceKey.trim()) {
+          const response = await apiRequest('/api/disposals/claims', {
+            method: 'POST',
+            headers: { 'x-device-key': deviceKey.trim() },
+            body: {
+              wasteType: group.value,
+              quantity: group.grams / 1000,
+            },
+          });
+          claimData = response.data;
+        } else {
+          claimData = {
+            claimToken: `trashquest-test:${group.value}:${group.grams}:${Date.now()}`,
+            pointsAvailable: estimatePoints(group.value, group.grams),
+            expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+          };
+        }
         claims.push({
           wasteType: group.value,
           label: group.label,
           icon: group.icon,
           grams: group.grams,
-          pointsAvailable: response.data.pointsAvailable,
-          claimToken: qrValue,
-          expiresAt: response.data.expiresAt,
-          qrImage,
+          pointsAvailable: claimData.pointsAvailable,
+          claimToken: claimData.claimToken,
+          expiresAt: claimData.expiresAt,
         });
       }
 
-      setClaim({ claims });
+      let sessionCode;
+      if (deviceKey.trim()) {
+        const sessionResponse = await apiRequest('/api/disposals/sessions', {
+          method: 'POST',
+          headers: { 'x-device-key': deviceKey.trim() },
+          body: { claimTokens: claims.map((entry) => entry.claimToken) },
+        });
+        sessionCode = sessionResponse.data.sessionCode;
+      } else {
+        sessionCode = `TQ-TEST${Math.floor(10 + Math.random() * 90)}`;
+      }
+      const sessionValue = JSON.stringify({
+        type: 'trashquest-session',
+        version: 1,
+        sessionCode,
+      });
+      const qrImage = await QRCode.toDataURL(sessionValue, {
+        margin: 2,
+        width: 420,
+        errorCorrectionLevel: 'M',
+        color: { dark: '#10221c', light: '#ffffff' },
+      });
+      setClaim({
+        claims,
+        qrImage,
+        sessionCode,
+        totalGrams: claims.reduce((sum, entry) => sum + entry.grams, 0),
+        totalPoints: claims.reduce((sum, entry) => sum + entry.pointsAvailable, 0),
+      });
       setItems([]);
-      const qrCount = claims.length;
-      setNotice(
-        qrCount === 1
-          ? 'QR code ready. Ask the resident to scan it with their phone.'
-          : `${qrCount} QR codes ready — one per waste type. Scan each to claim points.`
-      );
+      setNotice('Session QR code ready. Ask the resident to scan it once.');
     } catch (error) {
       setNotice(error.message);
+      setDisplayState('recognized');
     } finally {
       setBusy(false);
     }
@@ -434,6 +581,108 @@ function BinDisplayDashboard({ onExit }) {
     );
   }
 
+  return (
+    <main className={`bin-display-shell kiosk-state-${displayState}`}>
+      <header className="kiosk-header">
+        <div className="kiosk-brand"><span>TQ</span><strong>TrashQuest</strong></div>
+        <div className="station-status"><i /> Station online</div>
+        <button type="button" className="kiosk-exit" onClick={onExit}>Exit display</button>
+      </header>
+
+      <section className="kiosk-stage">
+        {displayState === 'ready' && (
+          <div className="kiosk-message ready-message">
+            <div className="drop-illustration" aria-hidden="true">
+              <span className="floating-item">♻</span>
+              <span className="drop-arrow">↓</span>
+              <div className="bin-opening"><i /><i /><i /></div>
+            </div>
+            <p className="kiosk-kicker">Smart waste station</p>
+            <h1>Drop an item to begin</h1>
+            <p>One item at a time. We’ll identify and sort it automatically.</p>
+          </div>
+        )}
+
+        {displayState === 'detecting' && (
+          <div className="kiosk-message detecting-message">
+            <div className="scanner-orb"><span>{detectedItem?.icon}</span><i /></div>
+            <p className="kiosk-kicker">Item detected</p>
+            <h1>Analyzing your item…</h1>
+            <p>Our sensors and AI are finding the correct bin.</p>
+            <div className="scan-progress"><i /></div>
+          </div>
+        )}
+
+        {displayState === 'recognized' && detectedItem && (
+          <div className="kiosk-message success-message">
+            <div className={`result-icon result-${detectedItem.value.toLowerCase().replace(' ', '-')}`}>
+              <span>{detectedItem.icon}</span><i>✓</i>
+            </div>
+            <p className="kiosk-kicker">Sorted successfully</p>
+            <h1>{detectedItem.label}</h1>
+            <p>{detectedItem.grams}g added · approximately {estimatePoints(detectedItem.value, detectedItem.grams)} {estimatePoints(detectedItem.value, detectedItem.grams) === 1 ? 'point' : 'points'}</p>
+            <div className="result-actions">
+              <button type="button" className="kiosk-primary" onClick={waitForNextItem}>Drop another item</button>
+              <button type="button" className="kiosk-secondary" onClick={finishSession}>I’m done — show QR</button>
+            </div>
+          </div>
+        )}
+
+        {displayState === 'qr' && (
+          <div className="kiosk-message qr-message">
+            <p className="kiosk-kicker">Session complete</p>
+            <h1>Scan to claim your points</h1>
+            {busy && <div className="qr-loader">Creating your QR code…</div>}
+            {notice && !claim && <div className="kiosk-error">{notice}</div>}
+            {claim?.claims?.length > 0 && (
+              <>
+                <div className="kiosk-qr-list single-session-qr">
+                  <article>
+                    <img src={claim.qrImage} alt="QR code for this disposal session" />
+                    <strong>{claim.claims.map((entry) => entry.icon).join(' ')} Complete session</strong>
+                    <span>{claim.totalGrams}g · {claim.totalPoints} {claim.totalPoints === 1 ? 'point' : 'points'}</span>
+                  </article>
+                </div>
+                <div className="session-code-block">
+                  <span>Or enter this code in the resident portal</span>
+                  <strong>{claim.sessionCode}</strong>
+                  <small>Code expires with this disposal session.</small>
+                </div>
+                {!deviceKey.trim() && <p className="test-qr-note">Test QR only — add a device key for claimable points.</p>}
+                <button type="button" className="kiosk-primary" onClick={clearSession}>Finish & reset station</button>
+              </>
+            )}
+          </div>
+        )}
+      </section>
+
+      {items.length > 0 && displayState !== 'qr' && (
+        <aside className="session-pill">
+          <span>{items.length} {items.length === 1 ? 'item' : 'items'}</span>
+          <strong>{totalGrams}g · ~{estimatedTotalPoints} pts</strong>
+        </aside>
+      )}
+
+      <aside className="hardware-test-panel">
+        <span>Hardware test controls</span>
+        <div>
+          {binWasteOptions.map((option, index) => (
+            <button
+              type="button"
+              key={option.value}
+              onClick={() => handleWasteDetected(option.value, [80, 45, 25][index])}
+              disabled={displayState === 'detecting' || displayState === 'qr'}
+            >
+              {option.icon} Simulate {option.label}
+            </button>
+          ))}
+        </div>
+        <small>Temporary — replace these buttons with sensor/YOLO events.</small>
+      </aside>
+    </main>
+  );
+
+  /* Legacy manual dashboard retained temporarily for backend reference.
   return (
     <main className="bin-display-shell">
       <header className="bin-display-header">
@@ -599,23 +848,26 @@ function BinDisplayDashboard({ onExit }) {
         </form>
       </section>
     </main>
-  );
+  ); */
 }
 
 function ResidentApp({ data, loading, logout, notice, refreshData, runAction, session, setView, token, totals, view }) {
   const tabs = [
-    { id: 'scan', label: 'Scan' },
-    { id: 'wallet', label: 'Points' },
-    { id: 'quests', label: 'Quests' },
-    { id: 'rewards', label: 'Rewards' },
+    { id: 'scan', label: 'Scan', icon: '⌗' },
+    { id: 'wallet', label: 'Points', icon: '◉' },
+    { id: 'quests', label: 'Quests', icon: '✓' },
+    { id: 'rewards', label: 'Rewards', icon: '◇' },
   ];
 
   return (
     <main className="resident-shell">
       <header className="resident-header">
-        <div>
-          <p className="eyebrow">Resident app</p>
-          <h1>Hi, {session.name}</h1>
+        <div className="resident-identity">
+          <div className="resident-logo">TQ</div>
+          <div>
+            <p className="eyebrow">Welcome back</p>
+            <h1>Hi, {session.firstName || session.name}</h1>
+          </div>
         </div>
         <button type="button" className="icon-button" onClick={logout} aria-label="Sign out">
           Exit
@@ -637,7 +889,8 @@ function ResidentApp({ data, loading, logout, notice, refreshData, runAction, se
             className={view === tab.id ? 'active' : ''}
             onClick={() => setView(tab.id)}
           >
-            {tab.label}
+            <span className="tab-icon" aria-hidden="true">{tab.icon}</span>
+            <span>{tab.label}</span>
           </button>
         ))}
       </nav>
@@ -661,15 +914,34 @@ function ResidentScan({ token, runAction }) {
   async function claimToken(claimToken) {
     const normalizedToken = claimToken.trim();
     if (!normalizedToken) return null;
+    let claimTokens = [normalizedToken];
+    let sessionCode = /^TQ-[A-Z0-9]{6}$/i.test(normalizedToken) ? normalizedToken.toUpperCase() : null;
+    try {
+      const sessionPayload = JSON.parse(normalizedToken);
+      if (sessionPayload.type === 'trashquest-session' && sessionPayload.sessionCode) {
+        sessionCode = String(sessionPayload.sessionCode).toUpperCase();
+        claimTokens = [];
+      } else if (sessionPayload.type === 'trashquest-session' && Array.isArray(sessionPayload.claimTokens)) {
+        claimTokens = sessionPayload.claimTokens.filter((entry) => typeof entry === 'string' && entry.trim());
+      }
+    } catch {
+      // A plain token is the legacy single-disposal QR format.
+    }
+    if (!sessionCode && claimTokens.length === 0) return null;
     const result = await runAction(
-      () => apiRequest('/api/disposals/claim', { method: 'POST', token, body: { claimToken: normalizedToken } }),
+      () => apiRequest('/api/disposals/claim', {
+        method: 'POST',
+        token,
+        body: sessionCode ? { sessionCode } : { claimTokens },
+      }),
       'Points claimed'
     );
     if (result) {
       setManualToken('');
       stopCamera();
       setScannerState('claimed');
-      setScannerMessage(`Claimed ${result.data?.pointsAwarded || 0} points.`);
+      const pointsClaimed = result.data?.totalPoints ?? result.data?.pointsAwarded ?? 0;
+      setScannerMessage(`Session claimed. You earned ${pointsClaimed} ${pointsClaimed === 1 ? 'point' : 'points'}.`);
     }
     return result;
   }
@@ -762,14 +1034,14 @@ function ResidentScan({ token, runAction }) {
 
       <form className="manual-claim" onSubmit={handleManualSubmit}>
         <label>
-          Claim token
+          Session code
           <input
             value={manualToken}
             onChange={(event) => setManualToken(event.target.value)}
-            placeholder="Paste token if camera cannot scan"
+            placeholder="Example: TQ-AB23CD"
           />
         </label>
-        <button type="submit" className="secondary-button">Claim manually</button>
+        <button type="submit" className="secondary-button">Claim with code</button>
       </form>
     </section>
   );
@@ -802,11 +1074,11 @@ function ResidentWallet({ data, loading, refreshData, session, totals }) {
 
 function AdminApp({ data, loading, logout, notice, refreshData, runAction, session, setView, token, totals, view }) {
   const tabs = [
-    { id: 'admin-overview', label: 'Overview' },
-    { id: 'admin-bins', label: 'Bins' },
-    { id: 'admin-quests', label: 'Quests' },
-    { id: 'admin-rewards', label: 'Rewards' },
-    { id: 'admin-users', label: 'Users' },
+    { id: 'admin-overview', label: 'Overview', icon: '⌂' },
+    { id: 'admin-bins', label: 'Bins', icon: '▣' },
+    { id: 'admin-quests', label: 'Quests', icon: '✓' },
+    { id: 'admin-rewards', label: 'Rewards', icon: '◇' },
+    { id: 'admin-users', label: 'Residents', icon: '◎' },
   ];
 
   return (
@@ -828,7 +1100,8 @@ function AdminApp({ data, loading, logout, notice, refreshData, runAction, sessi
               onClick={() => setView(tab.id)}
               type="button"
             >
-              {tab.label}
+              <span className="nav-icon" aria-hidden="true">{tab.icon}</span>
+              <span>{tab.label}</span>
             </button>
           ))}
         </nav>
@@ -846,7 +1119,7 @@ function AdminApp({ data, loading, logout, notice, refreshData, runAction, sessi
       <section className="content">
         <header className="topbar">
           <div>
-            <p className="eyebrow">Operations</p>
+            <p className="eyebrow">Barangay operations · {new Intl.DateTimeFormat(undefined, { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date())}</p>
             <h2>{tabs.find((tab) => tab.id === view)?.label || 'Overview'}</h2>
           </div>
           <button type="button" className="secondary-button" onClick={refreshData} disabled={loading}>
@@ -866,23 +1139,58 @@ function AdminApp({ data, loading, logout, notice, refreshData, runAction, sessi
 }
 
 function AdminOverview({ data, totals }) {
+  const [selectedUser, setSelectedUser] = useState(null);
+  const userRows = data.users.map((user) => {
+    const history = data.logs.filter((log) => {
+      const logUserId = log.user?._id || log.user;
+      return logUserId?.toString() === user._id?.toString();
+    });
+    return {
+      ...user,
+      history,
+      wasteKg: history.reduce((sum, log) => sum + (log.quantity || 0), 0),
+      earnedPoints: history.reduce((sum, log) => sum + (log.pointsAwarded || 0), 0),
+    };
+  });
+
   return (
     <div className="view-stack">
       <section className="metric-grid">
         <Metric label="Resident points" value={totals.disposalPoints} />
         <Metric label="Waste recorded" value={`${totals.wasteKg} kg`} />
-        <Metric label="Active quests" value={data.quests.filter((quest) => quest.status !== 'closed').length} />
+        <Metric label="Current quests" value={data.quests.filter((quest) => quest.status !== 'closed' && new Date(quest.expiryDate) >= new Date()).length} />
         <Metric label="Bins needing collection" value={totals.collectionCount} tone="warning" />
       </section>
       <section className="panel">
         <div className="section-heading">
           <div>
-            <p className="eyebrow">Audit</p>
-            <h3>Recent disposals</h3>
+            <p className="eyebrow">Resident activity</p>
+            <h3>Disposal history by resident</h3>
           </div>
         </div>
-        <DisposalTable disposals={data.logs.slice(0, 10)} admin />
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>Resident</th><th>Disposals</th><th>Waste</th><th>Points earned</th><th>Last activity</th></tr></thead>
+            <tbody>
+              {userRows.map((user) => (
+                <tr className="clickable-row" key={user._id} onClick={() => setSelectedUser(user)} tabIndex="0">
+                  <td><strong>{user.name}</strong><span className="cell-subtitle">{user.email}</span></td>
+                  <td>{user.history.length}</td>
+                  <td>{user.wasteKg.toFixed(2)} kg</td>
+                  <td>{user.earnedPoints}</td>
+                  <td>{user.history[0] ? formatDate(user.history[0].createdAt) : 'No activity'}</td>
+                </tr>
+              ))}
+              {userRows.length === 0 && <TableEmpty colSpan={5} text="No residents found." />}
+            </tbody>
+          </table>
+        </div>
       </section>
+      {selectedUser && (
+        <Modal title={`${selectedUser.name}'s disposal history`} eyebrow={selectedUser.email} onClose={() => setSelectedUser(null)} wide>
+          <DisposalTable disposals={selectedUser.history} />
+        </Modal>
+      )}
     </div>
   );
 }
@@ -890,6 +1198,7 @@ function AdminOverview({ data, totals }) {
 function AdminBinTools({ data, token, runAction, loading }) {
   const [createdKey, setCreatedKey] = useState('');
   const [levels, setLevels] = useState({});
+  const [showAddModal, setShowAddModal] = useState(false);
 
   async function createBin(event) {
     event.preventDefault();
@@ -906,29 +1215,21 @@ function AdminBinTools({ data, token, runAction, loading }) {
       'Bin created'
     );
     if (result?.data?.deviceApiKey) setCreatedKey(result.data.deviceApiKey);
-    if (result) event.currentTarget.reset();
-  }
-
-  async function createDeviceClaim(event) {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const result = await runAction(
-      () => apiRequest('/api/disposals/claims', {
-        method: 'POST',
-        body: {
-          wasteType: form.get('wasteType'),
-          quantity: Number(form.get('quantity')),
-        },
-        headers: { 'x-device-key': form.get('deviceApiKey') },
-      }),
-      'Claim token created'
-    );
-    if (result?.data?.claimToken) setCreatedKey(result.data.claimToken);
+    if (result) {
+      event.currentTarget.reset();
+      setShowAddModal(false);
+    }
   }
 
   return (
     <div className="view-stack">
-      <section className="admin-grid">
+      <div className="list-toolbar">
+        <div><p className="eyebrow">Maintenance</p><h3>Smart bins</h3></div>
+        <button type="button" className="primary-button" onClick={() => setShowAddModal(true)}>+ Add bin</button>
+      </div>
+
+      {showAddModal && (
+        <Modal title="Add a smart bin" eyebrow="New station" onClose={() => setShowAddModal(false)}>
         <AdminForm title="Add bin" eyebrow="Stations" onSubmit={createBin}>
           <label>Code<input name="code" placeholder="BIN-A01" required /></label>
           <label>Location<input name="location" placeholder="Main gate" /></label>
@@ -944,19 +1245,8 @@ function AdminBinTools({ data, token, runAction, loading }) {
           </fieldset>
           <button className="primary-button" type="submit" disabled={loading}>Create bin</button>
         </AdminForm>
-
-        <AdminForm title="Station claim test" eyebrow="Device flow" onSubmit={createDeviceClaim}>
-          <label className="wide">Device API key<input name="deviceApiKey" placeholder="Paste a bin device key" required /></label>
-          <label>
-            Waste type
-            <select name="wasteType" required>
-              {wasteTypes.map((type) => <option key={type}>{type}</option>)}
-            </select>
-          </label>
-          <label>Quantity kg<input name="quantity" type="number" step="0.1" min="0.1" defaultValue="1" required /></label>
-          <button className="secondary-button" type="submit" disabled={loading}>Generate claim token</button>
-        </AdminForm>
-      </section>
+        </Modal>
+      )}
 
       {createdKey && (
         <section className="panel highlight-panel">
@@ -968,8 +1258,8 @@ function AdminBinTools({ data, token, runAction, loading }) {
       <section className="panel">
         <div className="section-heading">
           <div>
-            <p className="eyebrow">Maintenance</p>
-            <h3>Smart bins</h3>
+            <p className="eyebrow">All stations</p>
+            <h3>{data.bins.length} registered bins</h3>
           </div>
         </div>
         <div className="table-wrap">
@@ -989,14 +1279,24 @@ function AdminBinTools({ data, token, runAction, loading }) {
                   <td>{bin.code}</td>
                   <td>{bin.location || 'Unassigned'}</td>
                   <td>
-                    <input
-                      className="tiny-input"
-                      type="number"
-                      min="0"
-                      max="100"
-                      value={levels[bin._id] ?? bin.fillLevel ?? 0}
-                      onChange={(event) => setLevels({ ...levels, [bin._id]: event.target.value })}
-                    />
+                    <div className="bin-fill-control">
+                      <div className="bin-fill-label">
+                        <strong>{levels[bin._id] ?? bin.fillLevel ?? 0}%</strong>
+                        <span className={(Number(levels[bin._id] ?? bin.fillLevel ?? 0) >= 100) ? 'capacity-full' : (Number(levels[bin._id] ?? bin.fillLevel ?? 0) >= 90 ? 'capacity-warning' : 'capacity-ok')}>
+                          {Number(levels[bin._id] ?? bin.fillLevel ?? 0) >= 100 ? 'Full capacity' : Number(levels[bin._id] ?? bin.fillLevel ?? 0) >= 90 ? 'Almost full' : 'Available'}
+                        </span>
+                      </div>
+                      <div className="bin-fill-meter"><i style={{ width: `${Math.min(100, Number(levels[bin._id] ?? bin.fillLevel ?? 0))}%` }} /></div>
+                      <input
+                        className="tiny-input"
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={levels[bin._id] ?? bin.fillLevel ?? 0}
+                        onChange={(event) => setLevels({ ...levels, [bin._id]: event.target.value })}
+                        aria-label={`Fill level for ${bin.code}`}
+                      />
+                    </div>
                   </td>
                   <td>{bin.status}</td>
                   <td className="row-actions">
@@ -1053,10 +1353,25 @@ function AdminBinTools({ data, token, runAction, loading }) {
 }
 
 function AdminQuestTools({ quests, token, runAction, loading }) {
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [questTab, setQuestTab] = useState('current');
+  const now = new Date();
+  const currentQuests = quests.filter((quest) => quest.status !== 'closed' && new Date(quest.expiryDate) >= now);
+  const historicalQuests = quests.filter((quest) => quest.status === 'closed' || new Date(quest.expiryDate) < now);
+
   async function createQuest(event) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const wasteType = form.get('wasteType');
+    const targetCount = form.get('targetCount') ? Number(form.get('targetCount')) : null;
+    const targetWeightKg = form.get('targetWeightKg') ? Number(form.get('targetWeightKg')) : null;
+    if (!targetCount && !targetWeightKg) {
+      const targetInput = event.currentTarget.querySelector('[name="targetCount"]');
+      targetInput.setCustomValidity('Enter an item target or a weight target.');
+      targetInput.reportValidity();
+      targetInput.setCustomValidity('');
+      return;
+    }
     const result = await runAction(
       () => apiRequest('/api/quests', {
         method: 'POST',
@@ -1065,19 +1380,40 @@ function AdminQuestTools({ quests, token, runAction, loading }) {
           title: form.get('title'),
           description: form.get('description'),
           wasteType: wasteType || null,
-          targetCount: Number(form.get('targetCount')),
+          targetCount,
+          targetWeightKg,
           pointsReward: Number(form.get('pointsReward')),
+          startDate: form.get('startDate'),
           expiryDate: form.get('expiryDate'),
+          frequency: form.get('frequency'),
         },
       }),
       'Quest created'
     );
-    if (result) event.currentTarget.reset();
+    if (result) {
+      event.currentTarget.reset();
+      setShowAddModal(false);
+    }
   }
 
   return (
     <div className="view-stack">
-      <AdminForm title="Add quest" eyebrow="Goals" onSubmit={createQuest}>
+      <div className="list-toolbar">
+        <div><p className="eyebrow">Community goals</p><h3>Quest schedule</h3></div>
+        <button type="button" className="primary-button" onClick={() => setShowAddModal(true)}>+ Add quest</button>
+      </div>
+      <div className="content-tabs" role="tablist" aria-label="Quest views">
+        <button type="button" role="tab" aria-selected={questTab === 'current'} className={questTab === 'current' ? 'active' : ''} onClick={() => setQuestTab('current')}>
+          Current <span>{currentQuests.length}</span>
+        </button>
+        <button type="button" role="tab" aria-selected={questTab === 'history'} className={questTab === 'history' ? 'active' : ''} onClick={() => setQuestTab('history')}>
+          History <span>{historicalQuests.length}</span>
+        </button>
+      </div>
+      <QuestView quests={questTab === 'current' ? currentQuests : historicalQuests} session={null} admin history={questTab === 'history'} />
+      {showAddModal && (
+      <Modal title="Schedule a quest" eyebrow="New community goal" onClose={() => setShowAddModal(false)}>
+      <AdminForm title="Quest details" eyebrow="Schedule" onSubmit={createQuest}>
         <label>Title<input name="title" placeholder="Plastic Patrol" required /></label>
         <label>Description<input name="description" placeholder="Collect clean plastic waste" /></label>
         <label>
@@ -1087,17 +1423,23 @@ function AdminQuestTools({ quests, token, runAction, loading }) {
             {wasteTypes.map((type) => <option key={type}>{type}</option>)}
           </select>
         </label>
-        <label>Target<input name="targetCount" type="number" min="1" defaultValue="5" required /></label>
+        <label>Item target <span>(optional)</span><input name="targetCount" type="number" min="1" placeholder="None" /></label>
+        <label>Weight target in kg <span>(optional)</span><input name="targetWeightKg" type="number" min="0.001" step="0.001" placeholder="None" /></label>
         <label>Reward points<input name="pointsReward" type="number" min="0" defaultValue="50" required /></label>
-        <label>Expiry<input name="expiryDate" type="datetime-local" required /></label>
+        <label>Quest type<select name="frequency" defaultValue="daily"><option value="daily">Daily quest</option><option value="weekly">Weekly quest</option></select></label>
+        <label>Starts<input name="startDate" type="datetime-local" required /></label>
+        <label>Ends<input name="expiryDate" type="datetime-local" required /></label>
         <button className="primary-button" type="submit" disabled={loading}>Create quest</button>
       </AdminForm>
-      <QuestView quests={quests} session={null} admin />
+      </Modal>
+      )}
     </div>
   );
 }
 
 function AdminRewardTools({ rewards, token, runAction, loading }) {
+  const [showAddModal, setShowAddModal] = useState(false);
+
   async function createReward(event) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -1114,11 +1456,21 @@ function AdminRewardTools({ rewards, token, runAction, loading }) {
       }),
       'Reward created'
     );
-    if (result) event.currentTarget.reset();
+    if (result) {
+      event.currentTarget.reset();
+      setShowAddModal(false);
+    }
   }
 
   return (
     <div className="view-stack">
+      <div className="list-toolbar">
+        <div><p className="eyebrow">Rewards catalog</p><h3>Available rewards</h3></div>
+        <button type="button" className="primary-button" onClick={() => setShowAddModal(true)}>+ Add reward</button>
+      </div>
+      <AdminRewardCatalog rewards={rewards} />
+      {showAddModal && (
+      <Modal title="Add a reward" eyebrow="Catalog item" onClose={() => setShowAddModal(false)}>
       <AdminForm title="Add reward" eyebrow="Catalog" onSubmit={createReward}>
         <label>Name<input name="name" placeholder="Eco voucher" required /></label>
         <label>Description<input name="description" placeholder="Redeem at the admin booth" /></label>
@@ -1126,44 +1478,103 @@ function AdminRewardTools({ rewards, token, runAction, loading }) {
         <label>Stock<input name="stock" type="number" min="0" defaultValue="10" required /></label>
         <button className="primary-button" type="submit" disabled={loading}>Create reward</button>
       </AdminForm>
-      <RewardView rewards={rewards} token={token} runAction={runAction} />
+      </Modal>
+      )}
       <AdminRedemptions rewards={rewards} token={token} runAction={runAction} />
     </div>
   );
 }
 
-function QuestView({ quests, session, admin = false }) {
+function AdminRewardCatalog({ rewards }) {
+  return (
+    <section className="panel">
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>Reward</th><th>Description</th><th>Cost</th><th>Stock</th><th>Status</th></tr></thead>
+          <tbody>
+            {rewards.map((reward) => (
+              <tr key={reward._id}>
+                <td><strong>{reward.name}</strong></td>
+                <td>{reward.description || '—'}</td>
+                <td>{reward.pointsCost} pts</td>
+                <td>{reward.stock}</td>
+                <td><span className={reward.status === 'active' ? 'badge success' : 'badge'}>{reward.status}</span></td>
+              </tr>
+            ))}
+            {rewards.length === 0 && <TableEmpty colSpan={5} text="No rewards found." />}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function QuestView({ quests, session, admin = false, history = false }) {
+  const [residentQuestTab, setResidentQuestTab] = useState('current');
+  const residentQuestRows = quests.map((quest) => {
+    const participant = quest.participants?.find((entry) => {
+      const participantId = entry.user?._id || entry.user;
+      return participantId?.toString() === session?._id?.toString();
+    });
+    return { quest, participant };
+  });
+  const residentCurrentQuests = residentQuestRows.filter(({ participant }) => !participant?.completed).map(({ quest }) => quest);
+  const residentCompletedQuests = residentQuestRows.filter(({ participant }) => participant?.completed).map(({ quest }) => quest);
+  const visibleQuests = admin
+    ? quests
+    : residentQuestTab === 'completed' ? residentCompletedQuests : residentCurrentQuests;
+
   return (
     <section className="panel">
       <div className="section-heading">
         <div>
           <p className="eyebrow">Community goals</p>
-          <h3>{admin ? 'All quests' : 'Available quests'}</h3>
+          <h3>{admin ? (history ? 'Quest history' : 'Current quests') : 'Available quests'}</h3>
         </div>
       </div>
+      {!admin && (
+        <div className="content-tabs resident-quest-tabs" role="tablist" aria-label="Quest views">
+          <button type="button" role="tab" aria-selected={residentQuestTab === 'current'} className={residentQuestTab === 'current' ? 'active' : ''} onClick={() => setResidentQuestTab('current')}>
+            Current <span>{residentCurrentQuests.length}</span>
+          </button>
+          <button type="button" role="tab" aria-selected={residentQuestTab === 'completed'} className={residentQuestTab === 'completed' ? 'active' : ''} onClick={() => setResidentQuestTab('completed')}>
+            Completed <span>{residentCompletedQuests.length}</span>
+          </button>
+        </div>
+      )}
       <div className="item-grid">
-        {quests.length === 0 && <EmptyState text="No quests are available right now." />}
-        {quests.map((quest) => {
-          const participantCount = quest.participants?.length || 0;
+        {visibleQuests.length === 0 && <EmptyState text={history ? 'No expired or closed quests yet.' : !admin && residentQuestTab === 'completed' ? 'No completed quests yet.' : 'No quests are available right now.'} />}
+        {visibleQuests.map((quest) => {
+          const participantCount = quest.participantCount ?? quest.participants?.length ?? 0;
           const userProgress = quest.participants?.find((participant) => {
             const participantId = participant.user?._id || participant.user;
             return participantId?.toString() === session?._id?.toString();
           });
           const progress = userProgress?.progress || 0;
-          const target = quest.targetCount || 1;
-          const progressPercent = Math.min(100, Math.round((progress / target) * 100));
+          const weightProgress = userProgress?.weightProgressKg || 0;
+          const countPercent = quest.targetCount ? Math.min(100, Math.round((progress / quest.targetCount) * 100)) : 100;
+          const weightPercent = quest.targetWeightKg ? Math.min(100, Math.round((weightProgress / quest.targetWeightKg) * 100)) : 100;
+          const progressPercent = Math.min(countPercent, weightPercent);
+          const isScheduled = quest.startDate && new Date(quest.startDate) > new Date();
+          const isExpired = new Date(quest.expiryDate) < new Date();
 
           return (
             <article className="item-card" key={quest._id}>
               <div>
+                <span className="badge">{quest.frequency || 'daily'}</span>{' '}
+                <span className="badge">{isExpired ? 'expired' : isScheduled ? 'scheduled' : quest.status}</span>{' '}
                 <span className="badge">{quest.wasteType || 'Any waste'}</span>
                 <h4>{quest.title}</h4>
                 <p>{quest.description || 'Complete the target before the expiry date.'}</p>
               </div>
               <dl>
-                <div><dt>Target</dt><dd>{quest.targetCount}</dd></div>
+                <div><dt>Item target</dt><dd>{quest.targetCount || 'None'}</dd></div>
+                <div><dt>Weight target</dt><dd>{quest.targetWeightKg ? `${quest.targetWeightKg} kg` : 'None'}</dd></div>
                 <div><dt>Reward</dt><dd>{quest.pointsReward} pts</dd></div>
-                <div><dt>{admin ? 'Tracked' : 'Progress'}</dt><dd>{admin ? participantCount : `${progress}/${target}`}</dd></div>
+                <div><dt>{admin ? 'Tracked' : 'Items'}</dt><dd>{admin ? participantCount : quest.targetCount ? `${progress}/${quest.targetCount}` : 'Not required'}</dd></div>
+                {!admin && <div><dt>Weight</dt><dd>{quest.targetWeightKg ? `${weightProgress.toFixed(2)}/${quest.targetWeightKg} kg` : 'Not required'}</dd></div>}
+                {admin && <div><dt>Starts</dt><dd>{formatDate(quest.startDate)}</dd></div>}
+                {admin && <div><dt>Ends</dt><dd>{formatDate(quest.expiryDate)}</dd></div>}
               </dl>
               {!admin && (
                 <div className="quest-progress">
@@ -1284,6 +1695,29 @@ function AdminRedemptions({ rewards, token, runAction }) {
 }
 
 function AdminUsers({ users, token, runAction }) {
+  const [search, setSearch] = useState('');
+  const [sort, setSort] = useState({ key: 'name', direction: 'asc' });
+  const [page, setPage] = useState(1);
+  const pageSize = 10;
+  const filteredUsers = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return users
+      .filter((user) => !query || `${user.name} ${user.email} ${user.status}`.toLowerCase().includes(query))
+      .sort((a, b) => {
+        const left = sort.key === 'points' ? Number(a.points || 0) : String(a[sort.key] || '').toLowerCase();
+        const right = sort.key === 'points' ? Number(b.points || 0) : String(b[sort.key] || '').toLowerCase();
+        const result = left < right ? -1 : left > right ? 1 : 0;
+        return sort.direction === 'asc' ? result : -result;
+      });
+  }, [users, search, sort]);
+  const totalPages = Math.max(1, Math.ceil(filteredUsers.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const visibleUsers = filteredUsers.slice((safePage - 1) * pageSize, safePage * pageSize);
+
+  function changeSort(key) {
+    setSort((current) => ({ key, direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc' }));
+  }
+
   return (
     <section className="panel">
       <div className="section-heading">
@@ -1291,20 +1725,30 @@ function AdminUsers({ users, token, runAction }) {
           <p className="eyebrow">Residents</p>
           <h3>User directory</h3>
         </div>
+        <div className="directory-tools">
+          <input
+            type="search"
+            value={search}
+            onChange={(event) => { setSearch(event.target.value); setPage(1); }}
+            placeholder="Search name, email, or status…"
+            aria-label="Search users"
+          />
+          <span>{filteredUsers.length} users</span>
+        </div>
       </div>
       <div className="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>Name</th>
-              <th>Email</th>
-              <th>Points</th>
-              <th>Status</th>
+              <th><button className="sort-button" type="button" onClick={() => changeSort('name')}>Name {sort.key === 'name' ? (sort.direction === 'asc' ? '↑' : '↓') : ''}</button></th>
+              <th><button className="sort-button" type="button" onClick={() => changeSort('email')}>Email {sort.key === 'email' ? (sort.direction === 'asc' ? '↑' : '↓') : ''}</button></th>
+              <th><button className="sort-button" type="button" onClick={() => changeSort('points')}>Points {sort.key === 'points' ? (sort.direction === 'asc' ? '↑' : '↓') : ''}</button></th>
+              <th><button className="sort-button" type="button" onClick={() => changeSort('status')}>Status {sort.key === 'status' ? (sort.direction === 'asc' ? '↑' : '↓') : ''}</button></th>
               <th></th>
             </tr>
           </thead>
           <tbody>
-            {users.map((user) => (
+            {visibleUsers.map((user) => (
               <tr key={user._id}>
                 <td>{user.name}</td>
                 <td>{user.email}</td>
@@ -1327,11 +1771,38 @@ function AdminUsers({ users, token, runAction }) {
                 </td>
               </tr>
             ))}
-            {users.length === 0 && <TableEmpty colSpan={5} text="No users found." />}
+            {visibleUsers.length === 0 && <TableEmpty colSpan={5} text="No users match your search." />}
           </tbody>
         </table>
       </div>
+      <div className="pagination">
+        <button type="button" className="secondary-button small" disabled={safePage === 1} onClick={() => setPage(safePage - 1)}>Previous</button>
+        <span>Page {safePage} of {totalPages}</span>
+        <button type="button" className="secondary-button small" disabled={safePage === totalPages} onClick={() => setPage(safePage + 1)}>Next</button>
+      </div>
     </section>
+  );
+}
+
+function Modal({ title, eyebrow, onClose, children, wide = false }) {
+  useEffect(() => {
+    function closeOnEscape(event) {
+      if (event.key === 'Escape') onClose();
+    }
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [onClose]);
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className={`modal-card ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={title}>
+        <header>
+          <div><p className="eyebrow">{eyebrow}</p><h3>{title}</h3></div>
+          <button type="button" className="modal-close" onClick={onClose} aria-label="Close dialog">×</button>
+        </header>
+        {children}
+      </section>
+    </div>
   );
 }
 

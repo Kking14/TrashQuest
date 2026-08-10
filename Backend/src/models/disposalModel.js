@@ -32,6 +32,11 @@ const disposalSchema = new mongoose.Schema({
     },
 }, { timestamps: true });
 
+disposalSchema.index({ user: 1, createdAt: -1 });
+disposalSchema.index({ bin: 1, createdAt: -1 });
+disposalSchema.index({ wasteType: 1, createdAt: -1 });
+disposalSchema.index({ createdAt: -1 });
+
 const Disposal = mongoose.model('Disposal', disposalSchema);
 
 export default Disposal;

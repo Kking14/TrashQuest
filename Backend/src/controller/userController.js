@@ -2,8 +2,8 @@ import { getAllUsers, getUserById, updateUser, deleteUser } from '../services/us
 
 const listUsers = async (req, res) => {
     try {
-        const users = await getAllUsers();
-        res.status(200).json({ success: true, data: users });
+        const { users, pagination } = await getAllUsers(req.query);
+        res.status(200).json({ success: true, data: users, pagination });
     } catch (error) {
         res.status(400).json({ success: false, message: error.message });
     }
@@ -20,11 +20,13 @@ const getUser = async (req, res) => {
 
 const editUser = async (req, res) => {
     try {
-        // role and password are intentionally excluded here - role changes and
-        // password resets should go through dedicated, more tightly guarded
-        // flows (e.g. updatePassword in authController.js), not a generic
-        // profile-edit endpoint.
-        const { role, password, ...safeUpdates } = req.body;
+        const allowedFields = ['status', 'zone'];
+        const safeUpdates = Object.fromEntries(
+            Object.entries(req.body).filter(([key]) => allowedFields.includes(key))
+        );
+        if (Object.keys(safeUpdates).length === 0) {
+            return res.status(400).json({ success: false, message: 'No permitted fields were provided' });
+        }
         const user = await updateUser(req.params.id, safeUpdates);
         res.status(200).json({ success: true, message: 'User updated successfully', data: user });
     } catch (error) {

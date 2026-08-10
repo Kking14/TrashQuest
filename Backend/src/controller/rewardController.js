@@ -17,7 +17,7 @@ const addReward = async (req, res) => {
 
 const listRewards = async (req, res) => {
     try {
-        const rewards = await getAllRewards();
+        const rewards = await getAllRewards({ includeRedemptions: req.user.role === 'admin' });
         res.status(200).json({ success: true, data: rewards });
     } catch (error) {
         res.status(400).json({ success: false, message: error.message });

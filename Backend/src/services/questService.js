@@ -7,15 +7,36 @@ const createQuest = async (questData) => {
 };
 
 const getAllQuests = async () => {
-    const quests = await Quest.find().sort({ createdAt: -1 });
-    return quests;
+    const quests = await Quest.find().sort({ createdAt: -1 }).limit(500).lean();
+    return quests.map((quest) => ({
+        ...quest,
+        participantCount: quest.participants?.length || 0,
+        participants: [],
+    }));
 };
 
 const listActiveQuests = async (req) => {
+    const now = new Date();
     const quests = await Quest.find({
-        status: 'active',
-    }).sort({ expiryDate: 1 });
-    return quests;
+        $or: [
+            {
+                status: 'active',
+                expiryDate: { $gte: now },
+                $or: [{ startDate: { $exists: false } }, { startDate: { $lte: now } }],
+            },
+            {
+                participants: {
+                    $elemMatch: { user: req.user.id, completed: true },
+                },
+            },
+        ],
+    }).sort({ expiryDate: 1 }).limit(200).lean();
+    return quests.map((quest) => ({
+        ...quest,
+        participants: (quest.participants || []).filter(
+            (participant) => participant.user.toString() === req.user.id
+        ),
+    }));
 };
 
 const joinQuest = async (questID, userID) => {
@@ -23,7 +44,7 @@ const joinQuest = async (questID, userID) => {
     if (!quest) {
         throw new Error('Quest not found');
     }
-    if (quest.status !== 'active' || quest.expiryDate < new Date()) {
+    if (quest.status !== 'active' || (quest.startDate && quest.startDate > new Date()) || quest.expiryDate < new Date()) {
         throw new Error('This quest is no longer active');
     }
 
@@ -39,12 +60,15 @@ const joinQuest = async (questID, userID) => {
 
 // Called right after a disposal claim is completed. Matching active quests
 // automatically track the resident; no manual join is required.
-const updateQuestProgress = async (userID, wasteType) => {
+const updateQuestProgress = async (userID, wasteType, quantityKg = 0) => {
     const now = new Date();
     const quests = await Quest.find({
         status: 'active',
         expiryDate: { $gte: now },
-        $or: [{ wasteType: null }, { wasteType }],
+        $and: [
+            { $or: [{ startDate: { $exists: false } }, { startDate: { $lte: now } }] },
+            { $or: [{ wasteType: null }, { wasteType }] },
+        ],
     });
 
     for (const quest of quests) {
@@ -56,8 +80,11 @@ const updateQuestProgress = async (userID, wasteType) => {
         if (participant.completed) continue;
 
         participant.progress += 1;
+        participant.weightProgressKg = (participant.weightProgressKg || 0) + Number(quantityKg || 0);
 
-        if (participant.progress >= quest.targetCount) {
+        const countTargetMet = !quest.targetCount || participant.progress >= quest.targetCount;
+        const weightTargetMet = !quest.targetWeightKg || participant.weightProgressKg >= quest.targetWeightKg;
+        if (countTargetMet && weightTargetMet) {
             participant.completed = true;
             participant.completedAt = new Date();
             await User.findByIdAndUpdate(userID, { $inc: { points: quest.pointsReward } });

@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import Disposal from '../models/disposalModel.js';
 import DisposalClaim from '../models/disposalClaimModel.js';
+import DisposalSession from '../models/disposalSessionModel.js';
 import Bin from '../models/binModel.js';
 import User from '../models/userModel.js';
 import { calculatePoints } from './pointsService.js';
@@ -12,6 +13,62 @@ const CLAIM_EXPIRY_MINUTES = 3;
 // Rough estimate of how much 1kg of waste raises a bin's fill level by.
 // Tune this once real ultrasonic sensor data is available.
 const FILL_INCREMENT_PER_KG = 2;
+const SESSION_CODE_CHARACTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+const generateSessionCode = () => {
+    let code = 'TQ-';
+    for (let index = 0; index < 6; index += 1) {
+        code += SESSION_CODE_CHARACTERS[crypto.randomInt(SESSION_CODE_CHARACTERS.length)];
+    }
+    return code;
+};
+
+const createDisposalSession = async (bin, claimTokens) => {
+    const uniqueTokens = [...new Set(claimTokens || [])];
+    if (uniqueTokens.length === 0) {
+        throw new Error('A disposal session needs at least one claim');
+    }
+    const claims = await DisposalClaim.find({ claimToken: { $in: uniqueTokens }, bin: bin._id });
+    if (claims.length !== uniqueTokens.length) {
+        throw new Error('One or more disposal claims do not belong to this bin');
+    }
+    if (claims.some((claim) => claim.status !== 'pending' || claim.expiresAt < new Date())) {
+        throw new Error('One or more disposal claims are no longer available');
+    }
+
+    let session;
+    for (let attempt = 0; attempt < 5 && !session; attempt += 1) {
+        try {
+            session = await DisposalSession.create({
+                bin: bin._id,
+                code: generateSessionCode(),
+                claimTokens: uniqueTokens,
+                expiresAt: new Date(Math.min(...claims.map((claim) => claim.expiresAt.getTime()))),
+            });
+        } catch (error) {
+            if (error.code !== 11000) throw error;
+        }
+    }
+    if (!session) throw new Error('Could not create a unique session code');
+    return session;
+};
+
+const getDisposalSessionTokens = async (sessionCode, userID) => {
+    const code = sessionCode.trim().toUpperCase();
+    const claimedAt = new Date();
+    const session = await DisposalSession.findOneAndUpdate(
+        { code, status: 'available', expiresAt: { $gt: claimedAt } },
+        { $set: { status: 'claimed', claimedBy: userID, claimedAt } },
+        { new: true }
+    );
+    if (!session) {
+        const existingSession = await DisposalSession.findOne({ code }).select('status expiresAt').lean();
+        if (!existingSession) throw new Error('Invalid session code');
+        if (existingSession.status === 'claimed') throw new Error('This session has already been claimed');
+        throw new Error('This session code has expired');
+    }
+    return session;
+};
  
 // Step 1: called by the bin device itself right after its sensor detects a
 // disposal (wasteType/quantity come from the sensor, not a resident). This
@@ -55,18 +112,16 @@ const createDisposalClaim = async (bin, wasteType, quantity) => {
 // along with their own auth. This is the only point a resident is attached
 // to the disposal.
 const claimDisposal = async (claimToken, userID) => {
-    const claim = await DisposalClaim.findOne({ claimToken });
+    const claimedAt = new Date();
+    const claim = await DisposalClaim.findOneAndUpdate(
+        { claimToken, status: 'pending', expiresAt: { $gt: claimedAt } },
+        { $set: { status: 'claimed', claimedBy: userID, claimedAt } },
+        { new: true }
+    );
     if (!claim) {
-        throw new Error('Invalid claim code');
-    }
-    if (claim.status === 'claimed') {
-        throw new Error('This code has already been claimed');
-    }
-    if (claim.status === 'expired' || claim.expiresAt < new Date()) {
-        if (claim.status !== 'expired') {
-            claim.status = 'expired';
-            await claim.save();
-        }
+        const existingClaim = await DisposalClaim.findOne({ claimToken }).select('status expiresAt').lean();
+        if (!existingClaim) throw new Error('Invalid claim code');
+        if (existingClaim.status === 'claimed') throw new Error('This code has already been claimed');
         throw new Error('This code has expired');
     }
  
@@ -88,15 +143,10 @@ const claimDisposal = async (claimToken, userID) => {
  
     await User.findByIdAndUpdate(userID, { $inc: { points: pointsAwarded } });
  
-    claim.status = 'claimed';
-    claim.claimedBy = userID;
-    claim.claimedAt = new Date();
-    await claim.save();
- 
     // A quest-tracking hiccup shouldn't roll back a disposal that already
     // happened and already paid out points - log and move on.
     try {
-        await updateQuestProgress(userID, claim.wasteType);
+        await updateQuestProgress(userID, claim.wasteType, claim.quantity);
     } catch (error) {
         console.error('Quest progress update failed:', error.message);
     }
@@ -107,10 +157,12 @@ const claimDisposal = async (claimToken, userID) => {
 const getUserDisposals = async (userID) => {
     const disposals = await Disposal.find({ user: userID })
         .populate('bin', 'code location')
-        .sort({ createdAt: -1 });
+        .sort({ createdAt: -1 })
+        .limit(200)
+        .lean();
     return disposals;
 };
- 
+
 const getAllDisposals = async (filters = {}) => {
     const query = {};
     if (filters.wasteType) query.wasteType = filters.wasteType;
@@ -124,8 +176,10 @@ const getAllDisposals = async (filters = {}) => {
     const disposals = await Disposal.find(query)
         .populate('user', 'name email')
         .populate('bin', 'code location')
-        .sort({ createdAt: -1 });
+        .sort({ createdAt: -1 })
+        .limit(Math.min(1000, Math.max(1, Number(filters.limit) || 500)))
+        .lean();
     return disposals;
 };
  
-export { createDisposalClaim, claimDisposal, getUserDisposals, getAllDisposals };
+export { createDisposalClaim, createDisposalSession, getDisposalSessionTokens, claimDisposal, getUserDisposals, getAllDisposals };

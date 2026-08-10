@@ -3,9 +3,14 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 
 const registerUser = async (userData) => {
-    const { name, email, password } = userData; // role removed - clients can't set their own role
+    const { firstName, lastName, middleInitial, email, password } = userData;
+    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedMiddleInitial = middleInitial?.trim().charAt(0).toUpperCase() || null;
+    const name = [firstName.trim(), normalizedMiddleInitial ? `${normalizedMiddleInitial}.` : null, lastName.trim()]
+        .filter(Boolean)
+        .join(' ');
 
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email: normalizedEmail });
     if (existingUser) {
         throw new Error('Email is already registered');
     }
@@ -14,7 +19,10 @@ const registerUser = async (userData) => {
 
     const user = await User.create({
         name,
-        email,
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
+        middleInitial: normalizedMiddleInitial,
+        email: normalizedEmail,
         password: hashedPassword,
         // role intentionally omitted - schema default ('user') applies
     });
@@ -22,7 +30,8 @@ const registerUser = async (userData) => {
 }
 
 const loginUser = async (email, password) => {
-    const user = await User.findOne({ email });
+    const normalizedEmail = email.trim().toLowerCase();
+    const user = await User.findOne({ email: normalizedEmail });
     if (!user) {
         throw new Error('Invalid email or password');
     } else {
@@ -40,7 +49,11 @@ const loginUser = async (email, password) => {
         id: user._id,
         email: user.email,
         role: user.role,
-    }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    }, process.env.JWT_SECRET, {
+        expiresIn: '7d',
+        issuer: 'trashquest-api',
+        audience: 'trashquest-web',
+    });
     return { user, token };
 };
 

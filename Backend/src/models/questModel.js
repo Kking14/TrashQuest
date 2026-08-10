@@ -10,6 +10,10 @@ const participantSchema = new mongoose.Schema({
         type: Number,
         default: 0,
     },
+    weightProgressKg: {
+        type: Number,
+        default: 0,
+    },
     completed: {
         type: Boolean,
         default: false,
@@ -38,8 +42,13 @@ const questSchema = new mongoose.Schema({
     },
     targetCount: {
         type: Number,
-        required: [true, 'Target count is required'],
+        default: null,
         min: 1,
+    },
+    targetWeightKg: {
+        type: Number,
+        default: null,
+        min: 0.001,
     },
     pointsReward: {
         type: Number,
@@ -49,6 +58,15 @@ const questSchema = new mongoose.Schema({
     zone: {
         type: String,
         default: null,
+    },
+    frequency: {
+        type: String,
+        enum: ['daily', 'weekly'],
+        default: 'daily',
+    },
+    startDate: {
+        type: Date,
+        default: Date.now,
     },
     expiryDate: {
         type: Date,
@@ -64,6 +82,16 @@ const questSchema = new mongoose.Schema({
         default: [],
     },
 }, { timestamps: true });
+
+questSchema.pre('validate', function validateQuestTarget(next) {
+    if (!this.targetCount && !this.targetWeightKg) {
+        return next(new Error('Set an item target, a weight target, or both'));
+    }
+    return next();
+});
+
+questSchema.index({ status: 1, startDate: 1, expiryDate: 1 });
+questSchema.index({ wasteType: 1, status: 1, expiryDate: 1 });
 
 const Quest = mongoose.model('Quest', questSchema);
 

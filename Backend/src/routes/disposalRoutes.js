@@ -1,6 +1,7 @@
 import express from 'express';
 import {
     registerDisposalClaim,
+    registerDisposalSession,
     claimDisposalPoints,
     getMyDisposals,
     getDisposalLogs,
@@ -13,12 +14,12 @@ const router = express.Router();
  
 // Bin device -> backend (sensor just detected a disposal)
 router.post('/claims', authenticateDevice, registerDisposalClaim);
+router.post('/sessions', authenticateDevice, registerDisposalSession);
  
 // Resident app -> backend (resident scanned the QR the bin displayed)
 router.post('/claim', authenticate, claimDisposalPoints);
- 
+
 router.get('/me', authenticate, getMyDisposals);
 router.get('/', authenticate, authorize('admin'), getDisposalLogs);
- 
+
 export default router;
- 
