@@ -13,7 +13,7 @@ const createBin = async (binData) => {
 };
  
 const getAllBins = async () => {
-    const bins = await Bin.find().sort({ code: 1 });
+    const bins = await Bin.find().sort({ code: 1 }).lean();
     return bins;
 };
  

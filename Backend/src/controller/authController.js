@@ -1,6 +1,7 @@
 import { registerUser, loginUser } from '../services/authService.js';
 import bcrypt from 'bcryptjs';
 import User from '../models/userModel.js';
+import { getPasswordPolicyErrors } from '../utils/passwordPolicy.js';
 
 const registerAccount = async (req, res) => {
     try {
@@ -11,6 +12,9 @@ const registerAccount = async (req, res) => {
             data: {
                 _id: user._id,
                 name: user.name,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                middleInitial: user.middleInitial,
                 email: user.email,
                 role: user.role,
                 points: user.points,
@@ -33,6 +37,9 @@ const loginAccount = async (req, res) => {
             data: {
                 _id: user._id,
                 name: user.name,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                middleInitial: user.middleInitial,
                 email: user.email,
                 role: user.role,
                 points: user.points,
@@ -87,6 +94,11 @@ const updatePassword = async (req, res) => {
                 success: false,
                 message: 'Current password and new password are required',
             });
+        }
+
+        const passwordErrors = getPasswordPolicyErrors(newPassword);
+        if (passwordErrors.length > 0) {
+            return res.status(400).json({ success: false, errors: passwordErrors });
         }
 
         const user = await User.findById(userID);

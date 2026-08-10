@@ -55,6 +55,8 @@ const rewardSchema = new mongoose.Schema({
         default: [],
     },
 }, { timestamps: true });
+
+rewardSchema.index({ status: 1, pointsCost: 1 });
  
 const Reward = mongoose.model('Reward', rewardSchema);
  

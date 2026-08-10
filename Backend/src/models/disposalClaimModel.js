@@ -42,6 +42,12 @@ const disposalClaimSchema = new mongoose.Schema({
         required: true,
     },
 }, { timestamps: true });
+
+// Claim/session documents are operational data, not permanent audit records.
+// MongoDB removes them one day after their claim window expires.
+disposalClaimSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 86400 });
+disposalClaimSchema.index({ bin: 1, status: 1, expiresAt: 1 });
+disposalClaimSchema.index({ claimedBy: 1, claimedAt: -1 });
  
 const DisposalClaim = mongoose.model('DisposalClaim', disposalClaimSchema);
  

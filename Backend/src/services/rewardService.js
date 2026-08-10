@@ -7,8 +7,12 @@ const createReward = async (rewardData) => {
     return reward;
 };
  
-const getAllRewards = async () => {
-    const rewards = await Reward.find().sort({ pointsCost: 1 });
+const getAllRewards = async ({ includeRedemptions = false } = {}) => {
+    const rewards = await Reward.find()
+        .select(includeRedemptions ? undefined : '-redemptions')
+        .sort({ pointsCost: 1 })
+        .limit(500)
+        .lean();
     return rewards;
 };
  

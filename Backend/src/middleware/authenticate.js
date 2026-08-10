@@ -9,10 +9,17 @@ const authenticate = (req, res, next) => {
         });
     }
 
-    const token = authHeader.split(' ')[1];
+    const [scheme, token] = authHeader.split(' ');
+    if (scheme !== 'Bearer' || !token) {
+        return res.status(401).json({ success: false, message: 'Invalid authorization header' });
+    }
 
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const decoded = jwt.verify(token, process.env.JWT_SECRET, {
+            issuer: 'trashquest-api',
+            audience: 'trashquest-web',
+            algorithms: ['HS256'],
+        });
 
         req.user = decoded;
 

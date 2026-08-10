@@ -52,6 +52,9 @@ const binSchema = new mongoose.Schema({
         default: () => crypto.randomBytes(24).toString('hex'),
     },
 }, { timestamps: true });
+
+binSchema.index({ status: 1, fillLevel: -1 });
+binSchema.index({ zone: 1, status: 1 });
  
 const Bin = mongoose.model('Bin', binSchema);
  
