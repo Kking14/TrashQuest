@@ -2,9 +2,11 @@ import {
     createBin,
     getAllBins,
     getBinByCode,
+    getOrCreateDeviceKey,
     updateBin,
-    updateFillLevel,
+    updateFullStatusFromSensor,
     deactivateBin,
+    reactivateBin,
     regenerateDeviceKey,
 } from '../services/binService.js';
  
@@ -13,13 +15,12 @@ const addBin = async (req, res) => {
         const bin = await createBin(req.body);
         res.status(201).json({
             success: true,
-            message: 'Bin created successfully. Save the deviceApiKey now - it will not be shown again.',
+            message: 'Bin created successfully. Copy the device key to the station display.',
             data: {
                 _id: bin._id,
                 code: bin.code,
                 location: bin.location,
                 acceptedWasteTypes: bin.acceptedWasteTypes,
-                capacity: bin.capacity,
                 status: bin.status,
                 deviceApiKey: bin.deviceApiKey,
             },
@@ -35,6 +36,19 @@ const listBins = async (req, res) => {
         res.status(200).json({ success: true, data: bins });
     } catch (error) {
         res.status(400).json({ success: false, message: error.message });
+    }
+};
+
+const revealDeviceKey = async (req, res) => {
+    try {
+        const bin = await getOrCreateDeviceKey(req.params.id);
+        res.status(200).json({
+            success: true,
+            message: 'Device key retrieved',
+            data: { _id: bin._id, code: bin.code, deviceApiKey: bin.deviceApiKey },
+        });
+    } catch (error) {
+        res.status(404).json({ success: false, message: error.message });
     }
 };
  
@@ -61,14 +75,19 @@ const editBin = async (req, res) => {
     }
 };
  
-// For manual admin correction, or an ultrasonic-sensor integration to call
-const setFillLevel = async (req, res) => {
+const reportFullStatus = async (req, res) => {
     try {
-        const bin = await updateFillLevel(req.params.id, req.body.fillLevel);
+        const bin = await updateFullStatusFromSensor(req.bin, req.body.isFull);
         res.status(200).json({
             success: true,
-            message: 'Bin fill level updated',
-            data: bin,
+            message: bin.isFull ? 'Bin reported as full' : 'Bin reported as available',
+            data: {
+                _id: bin._id,
+                code: bin.code,
+                isFull: bin.isFull,
+                status: bin.status,
+                lastSensorUpdateAt: bin.lastSensorUpdateAt,
+            },
         });
     } catch (error) {
         res.status(400).json({ success: false, message: error.message });
@@ -87,14 +106,27 @@ const removeBin = async (req, res) => {
         res.status(400).json({ success: false, message: error.message });
     }
 };
+
+const restoreBin = async (req, res) => {
+    try {
+        const bin = await reactivateBin(req.params.id);
+        res.status(200).json({
+            success: true,
+            message: 'Bin reactivated successfully',
+            data: bin,
+        });
+    } catch (error) {
+        res.status(400).json({ success: false, message: error.message });
+    }
+};
  
-// Rotates the bin's device key (e.g. after a device swap) - shown once, same as creation
+// Rotates the bin's device key after a device swap or suspected key exposure.
 const rotateDeviceKey = async (req, res) => {
     try {
         const bin = await regenerateDeviceKey(req.params.id);
         res.status(200).json({
             success: true,
-            message: 'Device key regenerated. Save it now - it will not be shown again.',
+            message: 'Device key regenerated. Copy the new key to the station display.',
             data: { _id: bin._id, code: bin.code, deviceApiKey: bin.deviceApiKey },
         });
     } catch (error) {
@@ -102,4 +134,4 @@ const rotateDeviceKey = async (req, res) => {
     }
 };
  
-export { addBin, listBins, lookupBinByCode, editBin, setFillLevel, removeBin, rotateDeviceKey };
+export { addBin, listBins, revealDeviceKey, lookupBinByCode, editBin, reportFullStatus, removeBin, restoreBin, rotateDeviceKey };

@@ -46,7 +46,7 @@ const redeemReward = async (rewardID, userID) => {
                 throw new Error('User not found');
             }
             if (user.points < reward.pointsCost) {
-                throw new Error('Not enough points to redeem this reward');
+                throw new Error(`Not enough points. You currently have ${user.points} points, but this reward costs ${reward.pointsCost}.`);
             }
  
             user.points -= reward.pointsCost;

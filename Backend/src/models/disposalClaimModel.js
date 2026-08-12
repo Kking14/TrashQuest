@@ -17,6 +17,11 @@ const disposalClaimSchema = new mongoose.Schema({
         required: [true, 'Quantity (kg) is required'],
         min: 0,
     },
+    itemCount: {
+        type: Number,
+        min: 1,
+        default: 1,
+    },
     // What the bin's screen encodes as a QR code for the resident to scan
     claimToken: {
         type: String,

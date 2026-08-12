@@ -22,17 +22,15 @@ const binSchema = new mongoose.Schema({
         enum: ['Paper', 'Plastic', 'Tin Can'],
         default: ['Paper', 'Plastic', 'Tin Can'],
     },
-    capacity: {
-        type: Number,
-        default: 100,
-    },
-    fillLevel: {
-        type: Number,
-        default: 0,
-        min: 0,
-        max: 100,
+    isFull: {
+        type: Boolean,
+        default: false,
     },
     lastDisposalAt: {
+        type: Date,
+        default: null,
+    },
+    lastSensorUpdateAt: {
         type: Date,
         default: null,
     },
@@ -53,7 +51,7 @@ const binSchema = new mongoose.Schema({
     },
 }, { timestamps: true });
 
-binSchema.index({ status: 1, fillLevel: -1 });
+binSchema.index({ status: 1, isFull: -1 });
 binSchema.index({ zone: 1, status: 1 });
  
 const Bin = mongoose.model('Bin', binSchema);

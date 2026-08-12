@@ -4,8 +4,8 @@ import { createDisposalClaim, createDisposalSession, getDisposalSessionTokens, c
 // sensor detects a disposal. req.bin comes from authenticateDevice middleware.
 const registerDisposalClaim = async (req, res) => {
     try {
-        const { wasteType, quantity } = req.body;
-        const { claim, pointsAvailable } = await createDisposalClaim(req.bin, wasteType, quantity);
+        const { wasteType, quantity, itemCount } = req.body;
+        const { claim, pointsAvailable } = await createDisposalClaim(req.bin, wasteType, quantity, itemCount);
         res.status(201).json({
             success: true,
             message: 'Disposal claim created',
@@ -54,16 +54,25 @@ const claimDisposalPoints = async (req, res) => {
 
         const disposals = [];
         for (const claimToken of claimTokens) {
-            disposals.push(await claimDisposal(claimToken, req.user.id));
+            disposals.push(await claimDisposal(claimToken, req.user.id, disposalSession));
         }
         const totalPoints = disposals.reduce(
             (sum, disposal) => sum + (disposal.pointsAwarded || 0),
             0
         );
+        const completedQuests = [...new Map(
+            disposals
+                .flatMap((disposal) => disposal.completedQuests || [])
+                .map((quest) => [quest._id.toString(), quest])
+        ).values()];
+        const questProgressUpdates = disposals.flatMap((disposal) => disposal.questProgressUpdates || []);
+        const questUpdateWarnings = disposals
+            .map((disposal) => disposal.questUpdateWarning)
+            .filter(Boolean);
         res.status(200).json({
             success: true,
             message: 'Session points claimed successfully',
-            data: { disposals, totalPoints },
+            data: { disposals, totalPoints, completedQuests, questProgressUpdates, questUpdateWarnings },
         });
     } catch (error) {
         res.status(400).json({ success: false, message: error.message });

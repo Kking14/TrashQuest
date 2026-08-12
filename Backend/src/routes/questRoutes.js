@@ -5,6 +5,8 @@ import {
     listAvailableQuests,
     joinAQuest,
     endQuest,
+    editQuest,
+    removeQuest,
 } from '../controller/questController.js';
 import authenticate from '../middleware/authenticate.js';
 import authorize from '../middleware/authorizeRoles.js';
@@ -16,5 +18,7 @@ router.get('/', authenticate, authorize('admin'), listQuests);
 router.get('/available', authenticate, listAvailableQuests);
 router.put('/:id/join', authenticate, joinAQuest);
 router.put('/:id/close', authenticate, authorize('admin'), endQuest);
+router.put('/:id', authenticate, authorize('admin'), editQuest);
+router.delete('/:id', authenticate, authorize('admin'), removeQuest);
  
 export default router;

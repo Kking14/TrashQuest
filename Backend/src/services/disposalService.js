@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import mongoose from 'mongoose';
 import Disposal from '../models/disposalModel.js';
 import DisposalClaim from '../models/disposalClaimModel.js';
 import DisposalSession from '../models/disposalSessionModel.js';
@@ -6,13 +7,9 @@ import Bin from '../models/binModel.js';
 import User from '../models/userModel.js';
 import { calculatePoints } from './pointsService.js';
 import { updateQuestProgress } from './questService.js';
-import { FULL_THRESHOLD } from './binService.js';
  
 const CLAIM_EXPIRY_MINUTES = 3;
  
-// Rough estimate of how much 1kg of waste raises a bin's fill level by.
-// Tune this once real ultrasonic sensor data is available.
-const FILL_INCREMENT_PER_KG = 2;
 const SESSION_CODE_CHARACTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 const generateSessionCode = () => {
@@ -28,7 +25,10 @@ const createDisposalSession = async (bin, claimTokens) => {
     if (uniqueTokens.length === 0) {
         throw new Error('A disposal session needs at least one claim');
     }
-    const claims = await DisposalClaim.find({ claimToken: { $in: uniqueTokens }, bin: bin._id });
+    const claims = await DisposalClaim.find({
+        claimToken: mongoose.trusted({ $in: uniqueTokens }),
+        bin: bin._id,
+    });
     if (claims.length !== uniqueTokens.length) {
         throw new Error('One or more disposal claims do not belong to this bin');
     }
@@ -57,7 +57,7 @@ const getDisposalSessionTokens = async (sessionCode, userID) => {
     const code = sessionCode.trim().toUpperCase();
     const claimedAt = new Date();
     const session = await DisposalSession.findOneAndUpdate(
-        { code, status: 'available', expiresAt: { $gt: claimedAt } },
+        { code, status: 'available', expiresAt: mongoose.trusted({ $gt: claimedAt }) },
         { $set: { status: 'claimed', claimedBy: userID, claimedAt } },
         { new: true }
     );
@@ -72,10 +72,10 @@ const getDisposalSessionTokens = async (sessionCode, userID) => {
  
 // Step 1: called by the bin device itself right after its sensor detects a
 // disposal (wasteType/quantity come from the sensor, not a resident). This
-// registers the physical event - so the bin's fill level updates immediately
-// regardless of whether anyone ever scans the resulting QR - and returns a
+// registers the physical event regardless of whether anyone scans the QR.
+// Bin fullness is reported separately by the ultrasonic sensor. This returns a
 // short-lived claim token for the bin to display as a QR code.
-const createDisposalClaim = async (bin, wasteType, quantity) => {
+const createDisposalClaim = async (bin, wasteType, quantity, itemCount = 1) => {
     if (bin.status === 'inactive') {
         throw new Error('This bin is currently inactive');
     }
@@ -94,15 +94,12 @@ const createDisposalClaim = async (bin, wasteType, quantity) => {
         bin: bin._id,
         wasteType,
         quantity,
+        itemCount: Math.max(1, Math.floor(Number(itemCount) || 1)),
         claimToken,
         expiresAt,
     });
  
-    bin.fillLevel = Math.min(100, bin.fillLevel + quantity * FILL_INCREMENT_PER_KG);
     bin.lastDisposalAt = new Date();
-    if (bin.fillLevel >= FULL_THRESHOLD) {
-        bin.status = 'needs_collection';
-    }
     await bin.save();
  
     return { claim, pointsAvailable };
@@ -111,10 +108,10 @@ const createDisposalClaim = async (bin, wasteType, quantity) => {
 // Step 2: called when a resident scans the QR and the app submits the token
 // along with their own auth. This is the only point a resident is attached
 // to the disposal.
-const claimDisposal = async (claimToken, userID) => {
+const claimDisposal = async (claimToken, userID, disposalSession = null) => {
     const claimedAt = new Date();
     const claim = await DisposalClaim.findOneAndUpdate(
-        { claimToken, status: 'pending', expiresAt: { $gt: claimedAt } },
+        { claimToken, status: 'pending', expiresAt: mongoose.trusted({ $gt: claimedAt }) },
         { $set: { status: 'claimed', claimedBy: userID, claimedAt } },
         { new: true }
     );
@@ -135,9 +132,12 @@ const claimDisposal = async (claimToken, userID) => {
     const disposal = await Disposal.create({
         user: userID,
         bin: bin._id,
+        session: disposalSession?._id || null,
+        sessionCode: disposalSession?.code || null,
         zone: bin.zone || 'default',
         wasteType: claim.wasteType,
         quantity: claim.quantity,
+        itemCount: claim.itemCount || 1,
         pointsAwarded,
     });
  
@@ -145,22 +145,63 @@ const claimDisposal = async (claimToken, userID) => {
  
     // A quest-tracking hiccup shouldn't roll back a disposal that already
     // happened and already paid out points - log and move on.
+    let completedQuests = [];
+    let questProgressUpdates = [];
+    let questUpdateWarning = null;
     try {
-        await updateQuestProgress(userID, claim.wasteType, claim.quantity);
+        const questResult = await updateQuestProgress(
+            userID,
+            claim.wasteType,
+            claim.quantity,
+            claim.itemCount || 1
+        );
+        completedQuests = questResult.completedQuests;
+        questProgressUpdates = questResult.progressUpdates;
     } catch (error) {
         console.error('Quest progress update failed:', error.message);
+        questUpdateWarning = 'Your disposal was claimed, but quest progress could not be updated. Please contact the barangay admin.';
     }
  
-    return disposal;
+    return { ...disposal.toObject(), completedQuests, questProgressUpdates, questUpdateWarning };
 };
  
 const getUserDisposals = async (userID) => {
     const disposals = await Disposal.find({ user: userID })
         .populate('bin', 'code location')
         .sort({ createdAt: -1 })
-        .limit(200)
+        .limit(500)
         .lean();
-    return disposals;
+
+    const grouped = new Map();
+    for (const disposal of disposals) {
+        const groupKey = disposal.session ? `session:${disposal.session}` : `legacy:${disposal._id}`;
+        if (!grouped.has(groupKey)) {
+            grouped.set(groupKey, {
+                _id: disposal.session || disposal._id,
+                sessionCode: disposal.sessionCode || null,
+                isSession: Boolean(disposal.session),
+                bin: disposal.bin,
+                quantity: 0,
+                pointsAwarded: 0,
+                createdAt: disposal.createdAt,
+                items: [],
+            });
+        }
+        const entry = grouped.get(groupKey);
+        entry.quantity += Number(disposal.quantity || 0);
+        entry.pointsAwarded += Number(disposal.pointsAwarded || 0);
+        entry.items.push({
+            _id: disposal._id,
+            wasteType: disposal.wasteType,
+            quantity: disposal.quantity,
+            pointsAwarded: disposal.pointsAwarded,
+        });
+        if (new Date(disposal.createdAt) > new Date(entry.createdAt)) {
+            entry.createdAt = disposal.createdAt;
+        }
+    }
+
+    return [...grouped.values()].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 };
 
 const getAllDisposals = async (filters = {}) => {
@@ -168,9 +209,10 @@ const getAllDisposals = async (filters = {}) => {
     if (filters.wasteType) query.wasteType = filters.wasteType;
     if (filters.userID) query.user = filters.userID;
     if (filters.startDate || filters.endDate) {
-        query.createdAt = {};
-        if (filters.startDate) query.createdAt.$gte = new Date(filters.startDate);
-        if (filters.endDate) query.createdAt.$lte = new Date(filters.endDate);
+        const dateRange = {};
+        if (filters.startDate) dateRange.$gte = new Date(filters.startDate);
+        if (filters.endDate) dateRange.$lte = new Date(filters.endDate);
+        query.createdAt = mongoose.trusted(dateRange);
     }
  
     const disposals = await Disposal.find(query)

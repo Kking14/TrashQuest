@@ -14,6 +14,10 @@ const participantSchema = new mongoose.Schema({
         type: Number,
         default: 0,
     },
+    weightProgressGrams: {
+        type: Number,
+        default: 0,
+    },
     completed: {
         type: Boolean,
         default: false,
@@ -50,6 +54,11 @@ const questSchema = new mongoose.Schema({
         default: null,
         min: 0.001,
     },
+    targetWeightGrams: {
+        type: Number,
+        default: null,
+        min: 1,
+    },
     pointsReward: {
         type: Number,
         required: [true, 'Points reward is required'],
@@ -84,7 +93,7 @@ const questSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 questSchema.pre('validate', function validateQuestTarget(next) {
-    if (!this.targetCount && !this.targetWeightKg) {
+    if (!this.targetCount && !this.targetWeightGrams && !this.targetWeightKg) {
         return next(new Error('Set an item target, a weight target, or both'));
     }
     return next();

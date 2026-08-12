@@ -18,7 +18,7 @@ The planned station hardware uses an inductive sensor for tin cans, an infrared 
 ## Main interfaces
 
 - **Resident portal** - register, sign in, claim disposal sessions, track points, complete quests, review history, and redeem rewards.
-- **Barangay dashboard** - monitor activity, residents, bin capacity, quests, schedules, and rewards.
+- **Barangay dashboard** - monitor activity, residents, full-bin alerts, quests, schedules, and rewards.
 - **Bin display** - simulate detected waste during development, group items into a session, and present its QR and manual claim code.
 
 ## Features
@@ -29,7 +29,7 @@ The planned station hardware uses an inductive sensor for tin cans, an infrared 
 - Plastic bottle, tin can, paper, and weight-based quest targets
 - Daily and weekly quests with scheduling and expiration handling
 - Completed and expired quest history
-- Bin fill-level and full-capacity indicators
+- Ultrasonic-sensor full/available bin indicators
 - Searchable, sortable, and paginated resident directory
 - Barangay activity history grouped by resident
 - Reward and bin management modals
@@ -42,7 +42,7 @@ The planned station hardware uses an inductive sensor for tin cans, an infrared 
 
 - React 19
 - Vite 6
-- QRCode
+- QRCode and qr-scanner
 
 ### Backend
 
@@ -133,6 +133,7 @@ The generated production files are written to `Frontend/dist`.
 - Use a unique, randomly generated `JWT_SECRET` with at least 32 characters.
 - Replace the development bin-display password before deployment.
 - Serve the deployed application over HTTPS.
+- HTTPS is required for live mobile camera scanning; residents can use the photo or session-code fallback when camera access is unavailable.
 - Restrict database network access and use a dedicated MongoDB account with only the permissions TrashQuest requires.
 
 ## Repository

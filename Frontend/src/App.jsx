@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
+import QrScanner from 'qr-scanner';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 const BIN_DASHBOARD_PASSWORD = import.meta.env.VITE_BIN_DASHBOARD_PASSWORD || 'admin123';
@@ -69,6 +70,8 @@ function App() {
   const [view, setView] = useState('scan');
   const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(false);
+  const [toasts, setToasts] = useState([]);
+  const toastTimers = useRef(new Map());
   const [data, setData] = useState({
     profile: null,
     bins: [],
@@ -84,15 +87,33 @@ function App() {
 
   const totals = useMemo(() => {
     const disposalPoints = data.disposals.reduce((sum, disposal) => sum + (disposal.pointsAwarded || 0), 0);
-    const wasteKg = data.disposals.reduce((sum, disposal) => sum + (disposal.quantity || 0), 0);
+    const wasteGrams = data.disposals.reduce((sum, disposal) => sum + (disposal.quantity || 0) * 1000, 0);
     const collectionCount = data.bins.filter((bin) => bin.status === 'needs_collection').length;
-    return { disposalPoints, wasteKg: wasteKg.toFixed(1), collectionCount };
+    return { disposalPoints, wasteGrams: Math.round(wasteGrams), collectionCount };
   }, [data]);
 
   useEffect(() => {
     if (!token) return;
     refreshData();
   }, [token]);
+
+  useEffect(() => () => {
+    toastTimers.current.forEach((timer) => window.clearTimeout(timer));
+  }, []);
+
+  function dismissToast(id) {
+    const timer = toastTimers.current.get(id);
+    if (timer) window.clearTimeout(timer);
+    toastTimers.current.delete(id);
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }
+
+  function showToast({ title, message, tone = 'success', duration = 5000 }) {
+    const id = crypto.randomUUID();
+    setToasts((current) => [...current.slice(-3), { id, title, message, tone }]);
+    const timer = window.setTimeout(() => dismissToast(id), duration);
+    toastTimers.current.set(id, timer);
+  }
 
   async function refreshData() {
     setLoading(true);
@@ -147,11 +168,37 @@ function App() {
       setLoading(true);
       setNotice('');
       const result = await action();
-      setNotice(result?.message || successMessage);
+      const actionMessage = result?.message || successMessage;
+      setNotice(actionMessage);
+      showToast({ title: 'Success', message: actionMessage, tone: 'success' });
+      (result?.data?.completedQuests || []).forEach((quest) => {
+        showToast({
+          title: 'Quest completed!',
+          message: `${quest.title} completed. You earned ${quest.pointsReward} points.`,
+          tone: 'quest',
+          duration: 7000,
+        });
+      });
+      (result?.data?.questProgressUpdates || [])
+        .filter((quest) => !quest.completed)
+        .forEach((quest) => {
+          const countText = quest.targetCount
+            ? `${quest.progress}/${quest.targetCount} item${quest.targetCount === 1 ? '' : 's'}`
+            : `${Math.round(quest.weightProgressGrams || 0)}/${quest.targetWeightGrams} g`;
+          showToast({
+            title: 'Quest progress updated',
+            message: `${quest.title}: ${countText}`,
+            tone: 'quest',
+          });
+        });
+      (result?.data?.questUpdateWarnings || []).forEach((message) => {
+        showToast({ title: 'Quest update warning', message, tone: 'error', duration: 8000 });
+      });
       await refreshData();
       return result;
     } catch (error) {
       setNotice(error.message);
+      showToast({ title: 'Action unsuccessful', message: error.message, tone: 'error', duration: 6500 });
       return null;
     } finally {
       setLoading(false);
@@ -167,7 +214,28 @@ function App() {
 
   if (!isAdmin) {
     return (
-      <ResidentApp
+      <>
+        <ResidentApp
+          data={data}
+          loading={loading}
+          logout={logout}
+          notice={notice}
+          refreshData={refreshData}
+          runAction={runAction}
+          session={session}
+          setView={setView}
+          token={token}
+          totals={totals}
+          view={view}
+        />
+        <ToastStack toasts={toasts} onDismiss={dismissToast} />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <AdminApp
         data={data}
         loading={loading}
         logout={logout}
@@ -180,23 +248,23 @@ function App() {
         totals={totals}
         view={view}
       />
-    );
-  }
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
+    </>
+  );
+}
 
+function ToastStack({ toasts, onDismiss }) {
+  if (toasts.length === 0) return null;
   return (
-    <AdminApp
-      data={data}
-      loading={loading}
-      logout={logout}
-      notice={notice}
-      refreshData={refreshData}
-      runAction={runAction}
-      session={session}
-      setView={setView}
-      token={token}
-      totals={totals}
-      view={view}
-    />
+    <aside className="toast-stack" aria-live="polite" aria-label="Notifications">
+      {toasts.map((toast) => (
+        <article className={`app-toast ${toast.tone}`} key={toast.id}>
+          <span className="toast-icon" aria-hidden="true">{toast.tone === 'error' ? '!' : toast.tone === 'quest' ? '★' : '✓'}</span>
+          <div><strong>{toast.title}</strong><p>{toast.message}</p></div>
+          <button type="button" onClick={() => onDismiss(toast.id)} aria-label="Dismiss notification">×</button>
+        </article>
+      ))}
+    </aside>
   );
 }
 
@@ -369,11 +437,13 @@ function BinDisplayDashboard({ onExit }) {
   const [claim, setClaim] = useState(null);
   const [displayState, setDisplayState] = useState('ready');
   const [detectedItem, setDetectedItem] = useState(null);
+  const [detectionConfirmed, setDetectionConfirmed] = useState(false);
   const detectionTimer = useRef(null);
 
   const totalGrams = items.reduce((sum, item) => sum + item.grams, 0);
   const groupedItems = binWasteOptions.map((option) => ({
     ...option,
+    count: items.filter((item) => item.wasteType === option.value).length,
     grams: items
       .filter((item) => item.wasteType === option.value)
       .reduce((sum, item) => sum + item.grams, 0),
@@ -388,18 +458,20 @@ function BinDisplayDashboard({ onExit }) {
   // Temporary test controls call this now. Later, the hardware bridge can call
   // this same function with the YOLO/sensor result and measured weight.
   function handleWasteDetected(wasteType, detectedGrams) {
-    if (displayState === 'detecting' || displayState === 'qr') return;
+    if (displayState !== 'ready') return;
     const option = binWasteOptions.find((entry) => entry.value === wasteType);
     const normalizedGrams = Math.max(1, Math.round(Number(detectedGrams) || 100));
+    const detectedId = crypto.randomUUID();
     setClaim(null);
     setNotice('');
-    setDetectedItem({ ...option, grams: normalizedGrams });
+    setDetectionConfirmed(false);
+    setDetectedItem({ ...option, id: detectedId, grams: normalizedGrams });
     setDisplayState('detecting');
     clearTimeout(detectionTimer.current);
     detectionTimer.current = setTimeout(() => {
       setItems((currentItems) => [
         ...currentItems,
-        { id: crypto.randomUUID(), wasteType, grams: normalizedGrams },
+        { id: detectedId, wasteType, grams: normalizedGrams },
       ]);
       setDisplayState('recognized');
     }, 900);
@@ -407,8 +479,17 @@ function BinDisplayDashboard({ onExit }) {
 
   function waitForNextItem() {
     setDetectedItem(null);
+    setDetectionConfirmed(false);
     setDisplayState('ready');
     setNotice('');
+  }
+
+  function rejectDetection() {
+    setItems((currentItems) => currentItems.filter((item) => item.id !== detectedItem?.id));
+    setDetectedItem(null);
+    setDetectionConfirmed(false);
+    setDisplayState('ready');
+    setNotice('Incorrect detection removed. Please place the item in the station again.');
   }
 
   function unlock(event) {
@@ -419,6 +500,8 @@ function BinDisplayDashboard({ onExit }) {
     }
     if (deviceKey.trim()) {
       localStorage.setItem('trashquest_bin_device_key', deviceKey.trim());
+    } else {
+      localStorage.removeItem('trashquest_bin_device_key');
     }
     setNotice('');
     setIsUnlocked(true);
@@ -426,8 +509,19 @@ function BinDisplayDashboard({ onExit }) {
 
   function saveDeviceKey(event) {
     event.preventDefault();
-    localStorage.setItem('trashquest_bin_device_key', deviceKey.trim());
-    setNotice('Device key saved for this bin display.');
+    if (deviceKey.trim()) {
+      localStorage.setItem('trashquest_bin_device_key', deviceKey.trim());
+      setNotice('Device key saved for this bin display.');
+    } else {
+      localStorage.removeItem('trashquest_bin_device_key');
+      setNotice('Saved device key cleared. This display is now in test mode.');
+    }
+  }
+
+  function clearDeviceKey() {
+    localStorage.removeItem('trashquest_bin_device_key');
+    setDeviceKey('');
+    setNotice('Old device key cleared. Paste the new key, or continue in test mode.');
   }
 
   function addWaste() {
@@ -458,6 +552,7 @@ function BinDisplayDashboard({ onExit }) {
     setItems([]);
     setClaim(null);
     setDetectedItem(null);
+    setDetectionConfirmed(false);
     setDisplayState('ready');
     setNotice('');
   }
@@ -466,7 +561,9 @@ function BinDisplayDashboard({ onExit }) {
     setNotice('Keep adding waste. Select a type and weight, then tap Add waste.');
   }
 
-  async function finishSession() {
+  async function finishSession(options = {}) {
+    const testMode = options?.testMode === true;
+    const activeDeviceKey = testMode ? '' : deviceKey.trim();
     if (items.length === 0) {
       setNotice('Add at least one waste item before generating a QR code.');
       return;
@@ -479,13 +576,14 @@ function BinDisplayDashboard({ onExit }) {
       const claims = [];
       for (const group of groupedItems) {
         let claimData;
-        if (deviceKey.trim()) {
+        if (activeDeviceKey) {
           const response = await apiRequest('/api/disposals/claims', {
             method: 'POST',
-            headers: { 'x-device-key': deviceKey.trim() },
+            headers: { 'x-device-key': activeDeviceKey },
             body: {
               wasteType: group.value,
               quantity: group.grams / 1000,
+              itemCount: group.count,
             },
           });
           claimData = response.data;
@@ -508,10 +606,10 @@ function BinDisplayDashboard({ onExit }) {
       }
 
       let sessionCode;
-      if (deviceKey.trim()) {
+      if (activeDeviceKey) {
         const sessionResponse = await apiRequest('/api/disposals/sessions', {
           method: 'POST',
-          headers: { 'x-device-key': deviceKey.trim() },
+          headers: { 'x-device-key': activeDeviceKey },
           body: { claimTokens: claims.map((entry) => entry.claimToken) },
         });
         sessionCode = sessionResponse.data.sessionCode;
@@ -533,6 +631,7 @@ function BinDisplayDashboard({ onExit }) {
         claims,
         qrImage,
         sessionCode,
+        testMode: !activeDeviceKey,
         totalGrams: claims.reduce((sum, entry) => sum + entry.grams, 0),
         totalPoints: claims.reduce((sum, entry) => sum + entry.pointsAvailable, 0),
       });
@@ -540,7 +639,7 @@ function BinDisplayDashboard({ onExit }) {
       setNotice('Session QR code ready. Ask the resident to scan it once.');
     } catch (error) {
       setNotice(error.message);
-      setDisplayState('recognized');
+      setDisplayState('qr');
     } finally {
       setBusy(false);
     }
@@ -574,6 +673,11 @@ function BinDisplayDashboard({ onExit }) {
             </label>
             {notice && <div className="notice compact">{notice}</div>}
             <button type="submit" className="primary-button">Unlock dashboard</button>
+            {deviceKey && (
+              <button type="button" className="secondary-button" onClick={clearDeviceKey}>
+                Clear saved device key
+              </button>
+            )}
             <button type="button" className="secondary-button" onClick={onExit}>Back to login</button>
           </form>
         </section>
@@ -600,6 +704,7 @@ function BinDisplayDashboard({ onExit }) {
             <p className="kiosk-kicker">Smart waste station</p>
             <h1>Drop an item to begin</h1>
             <p>One item at a time. We’ll identify and sort it automatically.</p>
+            {notice && <div className="kiosk-correction-notice">{notice}</div>}
           </div>
         )}
 
@@ -616,15 +721,25 @@ function BinDisplayDashboard({ onExit }) {
         {displayState === 'recognized' && detectedItem && (
           <div className="kiosk-message success-message">
             <div className={`result-icon result-${detectedItem.value.toLowerCase().replace(' ', '-')}`}>
-              <span>{detectedItem.icon}</span><i>✓</i>
+              <span>{detectedItem.icon}</span><i>{detectionConfirmed ? '✓' : '?'}</i>
             </div>
-            <p className="kiosk-kicker">Sorted successfully</p>
+            <p className="kiosk-kicker">Item identified</p>
             <h1>{detectedItem.label}</h1>
-            <p>{detectedItem.grams}g added · approximately {estimatePoints(detectedItem.value, detectedItem.grams)} {estimatePoints(detectedItem.value, detectedItem.grams) === 1 ? 'point' : 'points'}</p>
-            <div className="result-actions">
-              <button type="button" className="kiosk-primary" onClick={waitForNextItem}>Drop another item</button>
-              <button type="button" className="kiosk-secondary" onClick={finishSession}>I’m done — show QR</button>
-            </div>
+            <p>{detectedItem.grams}g · approximately {estimatePoints(detectedItem.value, detectedItem.grams)} {estimatePoints(detectedItem.value, detectedItem.grams) === 1 ? 'point' : 'points'}</p>
+            {!detectionConfirmed ? (
+              <div className="classification-review">
+                <strong>Is this identification correct?</strong>
+                <div>
+                  <button type="button" className="review-wrong" onClick={rejectDetection}><span>✕</span> No, incorrect</button>
+                  <button type="button" className="review-correct" onClick={() => setDetectionConfirmed(true)}><span>✓</span> Yes, correct</button>
+                </div>
+              </div>
+            ) : (
+              <div className="result-actions">
+                <button type="button" className="kiosk-primary" onClick={waitForNextItem}>Drop another item</button>
+                <button type="button" className="kiosk-secondary" onClick={finishSession}>I’m done — show QR</button>
+              </div>
+            )}
           </div>
         )}
 
@@ -633,7 +748,27 @@ function BinDisplayDashboard({ onExit }) {
             <p className="kiosk-kicker">Session complete</p>
             <h1>Scan to claim your points</h1>
             {busy && <div className="qr-loader">Creating your QR code…</div>}
-            {notice && !claim && <div className="kiosk-error">{notice}</div>}
+            {notice && !claim && (
+              <div className="qr-error-actions">
+                <div className="kiosk-error">{notice}</div>
+                <button
+                  type="button"
+                  className="kiosk-primary"
+                  onClick={() => {
+                    localStorage.removeItem('trashquest_bin_device_key');
+                    setDeviceKey('');
+                    finishSession({ testMode: true });
+                  }}
+                  disabled={busy}
+                >
+                  Generate test QR instead
+                </button>
+                <button type="button" className="kiosk-secondary" onClick={() => setDisplayState('recognized')}>
+                  Go back and retry
+                </button>
+                <small>Test QR codes verify the screen only and cannot award resident points.</small>
+              </div>
+            )}
             {claim?.claims?.length > 0 && (
               <>
                 <div className="kiosk-qr-list single-session-qr">
@@ -648,7 +783,7 @@ function BinDisplayDashboard({ onExit }) {
                   <strong>{claim.sessionCode}</strong>
                   <small>Code expires with this disposal session.</small>
                 </div>
-                {!deviceKey.trim() && <p className="test-qr-note">Test QR only — add a device key for claimable points.</p>}
+                {claim.testMode && <p className="test-qr-note">Test QR only — add a valid device key for claimable points.</p>}
                 <button type="button" className="kiosk-primary" onClick={clearSession}>Finish & reset station</button>
               </>
             )}
@@ -671,7 +806,7 @@ function BinDisplayDashboard({ onExit }) {
               type="button"
               key={option.value}
               onClick={() => handleWasteDetected(option.value, [80, 45, 25][index])}
-              disabled={displayState === 'detecting' || displayState === 'qr'}
+              disabled={displayState !== 'ready'}
             >
               {option.icon} Simulate {option.label}
             </button>
@@ -879,7 +1014,7 @@ function ResidentApp({ data, loading, logout, notice, refreshData, runAction, se
       {view === 'scan' && <ResidentScan token={token} runAction={runAction} />}
       {view === 'wallet' && <ResidentWallet data={data} loading={loading} refreshData={refreshData} session={session} totals={totals} />}
       {view === 'quests' && <QuestView quests={data.quests} session={session} />}
-      {view === 'rewards' && <RewardView rewards={data.rewards} token={token} runAction={runAction} />}
+      {view === 'rewards' && <RewardView rewards={data.rewards} points={data.profile?.points || 0} token={token} runAction={runAction} />}
 
       <nav className="bottom-tabs">
         {tabs.map((tab) => (
@@ -900,15 +1035,14 @@ function ResidentApp({ data, loading, logout, notice, refreshData, runAction, se
 
 function ResidentScan({ token, runAction }) {
   const videoRef = useRef(null);
-  const detectorRef = useRef(null);
-  const streamRef = useRef(null);
-  const scanTimerRef = useRef(null);
+  const scannerRef = useRef(null);
+  const claimingRef = useRef(false);
   const [manualToken, setManualToken] = useState('');
   const [scannerState, setScannerState] = useState('idle');
   const [scannerMessage, setScannerMessage] = useState('Point your camera at the QR code on the bin screen.');
 
   useEffect(() => {
-    return () => stopCamera();
+    return () => stopCamera(false);
   }, []);
 
   async function claimToken(claimToken) {
@@ -947,58 +1081,76 @@ function ResidentScan({ token, runAction }) {
   }
 
   async function startCamera() {
-    if (!('BarcodeDetector' in window)) {
+    if (!window.isSecureContext && !['localhost', '127.0.0.1'].includes(window.location.hostname)) {
       setScannerState('manual');
-      setScannerMessage('Camera QR scanning is not supported in this browser. Paste the token instead.');
+      setScannerMessage('Camera access requires HTTPS on a phone. Open the secure deployed site or enter the session code.');
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setScannerState('manual');
+      setScannerMessage('This browser cannot access the camera. Check HTTPS and browser permissions, or enter the session code.');
       return;
     }
 
     try {
-      detectorRef.current = new window.BarcodeDetector({ formats: ['qr_code'] });
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' } },
-        audio: false,
+      setScannerState('starting');
+      setScannerMessage('Starting camera...');
+      const hasCamera = await QrScanner.hasCamera();
+      if (!hasCamera) {
+        setScannerState('manual');
+        setScannerMessage('No camera was found on this device. Enter the session code instead.');
+        return;
+      }
+
+      scannerRef.current?.destroy();
+      claimingRef.current = false;
+      const scanner = new QrScanner(videoRef.current, handleScanResult, {
+        preferredCamera: 'environment',
+        maxScansPerSecond: 8,
+        returnDetailedScanResult: true,
+        highlightScanRegion: false,
+        highlightCodeOutline: true,
       });
-      streamRef.current = stream;
-      videoRef.current.srcObject = stream;
-      await videoRef.current.play();
+      scannerRef.current = scanner;
+      await scanner.start();
       setScannerState('scanning');
       setScannerMessage('Scanning bin QR code...');
-      scanTimerRef.current = window.setInterval(scanFrame, 700);
     } catch (error) {
+      scannerRef.current?.destroy();
+      scannerRef.current = null;
       setScannerState('manual');
-      setScannerMessage(error.message || 'Camera permission was blocked. Paste the token instead.');
-    }
-  }
-
-  async function scanFrame() {
-    if (!videoRef.current || !detectorRef.current || videoRef.current.readyState < 2) return;
-    try {
-      const codes = await detectorRef.current.detect(videoRef.current);
-      const value = codes[0]?.rawValue;
-      if (value) {
-        setScannerMessage('QR detected. Claiming points...');
-        await claimToken(value);
+      if (error?.name === 'NotAllowedError') {
+        setScannerMessage('Camera permission was denied. Allow camera access in your browser settings, then try again.');
+      } else if (error?.name === 'NotReadableError') {
+        setScannerMessage('The camera is being used by another app. Close it and try again.');
+      } else {
+        setScannerMessage(error.message || 'The camera could not start. Enter the session code instead.');
       }
-    } catch (error) {
-      setScannerMessage('Scanner paused. Try again or paste the token.');
-      stopCamera();
     }
   }
 
-  function stopCamera() {
-    if (scanTimerRef.current) {
-      window.clearInterval(scanTimerRef.current);
-      scanTimerRef.current = null;
+  async function handleScanResult(result) {
+    if (claimingRef.current) return;
+    const value = typeof result === 'string' ? result : result?.data;
+    if (!value) return;
+
+    claimingRef.current = true;
+    await scannerRef.current?.pause();
+    setScannerMessage('QR detected. Claiming points...');
+    const claimResult = await claimToken(value);
+    if (!claimResult && scannerRef.current) {
+      claimingRef.current = false;
+      setScannerMessage('That QR could not be claimed. Point the camera at a valid TrashQuest QR or enter its code.');
+      await scannerRef.current.start().catch(() => stopCamera());
     }
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-    setScannerState((current) => (current === 'scanning' ? 'idle' : current));
+  }
+
+  function stopCamera(updateState = true) {
+    scannerRef.current?.destroy();
+    scannerRef.current = null;
+    claimingRef.current = false;
+    if (updateState) setScannerState((current) => (['starting', 'scanning'].includes(current) ? 'idle' : current));
   }
 
   function handleManualSubmit(event) {
@@ -1006,11 +1158,47 @@ function ResidentScan({ token, runAction }) {
     claimToken(manualToken);
   }
 
+  async function handleQrImage(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setScannerState('reading-photo');
+    setScannerMessage('Reading QR code from image...');
+    try {
+      const result = await QrScanner.scanImage(file, {
+        returnDetailedScanResult: true,
+        alsoTryWithoutScanRegion: true,
+      });
+      setScannerMessage('QR code found. Claiming the session...');
+      const claimResult = await claimToken(result.data);
+      if (!claimResult) {
+        setScannerState('manual');
+        setScannerMessage('The QR was read, but its session could not be claimed. It may be expired, already claimed, or a test QR. Try entering the displayed session code.');
+      }
+    } catch (error) {
+      setScannerState('manual');
+      setScannerMessage('No QR pattern was detected in that image. Try a screenshot, or crop the photo so the QR is large, straight, and free of glare.');
+    } finally {
+      event.target.value = '';
+    }
+  }
+
   return (
     <section className="phone-scan-card">
       <div className="scan-hero">
-        <video ref={videoRef} className={scannerState === 'scanning' ? 'visible' : ''} playsInline muted />
-        {scannerState !== 'scanning' && (
+        <video
+          ref={videoRef}
+          className={['starting', 'scanning'].includes(scannerState) ? 'visible' : ''}
+          playsInline
+          muted
+          autoPlay
+        />
+        {['starting', 'scanning'].includes(scannerState) && (
+          <div className="live-scan-guide" aria-hidden="true">
+            <span />
+            <small>Align the QR code inside the box</small>
+          </div>
+        )}
+        {!['starting', 'scanning'].includes(scannerState) && (
           <div className="scan-placeholder">
             <span className="scan-corners" />
             <strong>Scan QR</strong>
@@ -1025,11 +1213,15 @@ function ResidentScan({ token, runAction }) {
       </div>
 
       <div className="scan-actions">
-        {scannerState === 'scanning' ? (
+        {['starting', 'scanning'].includes(scannerState) ? (
           <button type="button" className="secondary-button" onClick={stopCamera}>Stop camera</button>
         ) : (
           <button type="button" className="primary-button" onClick={startCamera}>Open camera scanner</button>
         )}
+        <label className={`secondary-button qr-photo-button ${scannerState === 'reading-photo' ? 'disabled' : ''}`}>
+          {scannerState === 'reading-photo' ? 'Reading image...' : 'Scan from photo or screenshot'}
+          <input type="file" accept="image/*" onChange={handleQrImage} disabled={scannerState === 'reading-photo'} />
+        </label>
       </div>
 
       <form className="manual-claim" onSubmit={handleManualSubmit}>
@@ -1054,13 +1246,13 @@ function ResidentWallet({ data, loading, refreshData, session, totals }) {
     <div className="view-stack">
       <section className="metric-grid resident-metrics">
         <Metric label="Total points" value={totalPoints} />
-        <Metric label="Waste recorded" value={`${totals.wasteKg} kg`} />
+        <Metric label="Waste recorded" value={`${totals.wasteGrams} g`} />
       </section>
       <section className="panel">
         <div className="section-heading">
           <div>
             <p className="eyebrow">History</p>
-            <h3>Your claims</h3>
+            <h3>Your disposal sessions</h3>
           </div>
           <button type="button" className="secondary-button small" onClick={refreshData} disabled={loading}>
             Refresh
@@ -1148,7 +1340,7 @@ function AdminOverview({ data, totals }) {
     return {
       ...user,
       history,
-      wasteKg: history.reduce((sum, log) => sum + (log.quantity || 0), 0),
+      wasteGrams: history.reduce((sum, log) => sum + (log.quantity || 0) * 1000, 0),
       earnedPoints: history.reduce((sum, log) => sum + (log.pointsAwarded || 0), 0),
     };
   });
@@ -1157,7 +1349,7 @@ function AdminOverview({ data, totals }) {
     <div className="view-stack">
       <section className="metric-grid">
         <Metric label="Resident points" value={totals.disposalPoints} />
-        <Metric label="Waste recorded" value={`${totals.wasteKg} kg`} />
+        <Metric label="Waste recorded" value={`${totals.wasteGrams} g`} />
         <Metric label="Current quests" value={data.quests.filter((quest) => quest.status !== 'closed' && new Date(quest.expiryDate) >= new Date()).length} />
         <Metric label="Bins needing collection" value={totals.collectionCount} tone="warning" />
       </section>
@@ -1176,7 +1368,7 @@ function AdminOverview({ data, totals }) {
                 <tr className="clickable-row" key={user._id} onClick={() => setSelectedUser(user)} tabIndex="0">
                   <td><strong>{user.name}</strong><span className="cell-subtitle">{user.email}</span></td>
                   <td>{user.history.length}</td>
-                  <td>{user.wasteKg.toFixed(2)} kg</td>
+                  <td>{Math.round(user.wasteGrams)} g</td>
                   <td>{user.earnedPoints}</td>
                   <td>{user.history[0] ? formatDate(user.history[0].createdAt) : 'No activity'}</td>
                 </tr>
@@ -1196,9 +1388,14 @@ function AdminOverview({ data, totals }) {
 }
 
 function AdminBinTools({ data, token, runAction, loading }) {
-  const [createdKey, setCreatedKey] = useState('');
-  const [levels, setLevels] = useState({});
+  const [createdKey, setCreatedKey] = useState(null);
+  const [keyCopied, setKeyCopied] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [binTab, setBinTab] = useState('active');
+
+  const activeBins = data.bins.filter((bin) => bin.status !== 'inactive');
+  const inactiveBins = data.bins.filter((bin) => bin.status === 'inactive');
+  const displayedBins = binTab === 'inactive' ? inactiveBins : activeBins;
 
   async function createBin(event) {
     event.preventDefault();
@@ -1207,18 +1404,57 @@ function AdminBinTools({ data, token, runAction, loading }) {
     const body = {
       code: form.get('code'),
       location: form.get('location'),
-      capacity: Number(form.get('capacity') || 100),
       acceptedWasteTypes,
     };
     const result = await runAction(
       () => apiRequest('/api/bins', { method: 'POST', token, body }),
       'Bin created'
     );
-    if (result?.data?.deviceApiKey) setCreatedKey(result.data.deviceApiKey);
+    if (result?.data?.deviceApiKey) {
+      setCreatedKey({ binCode: result.data.code, value: result.data.deviceApiKey });
+      setKeyCopied(false);
+    }
     if (result) {
       event.currentTarget.reset();
       setShowAddModal(false);
     }
+  }
+
+  async function rotateDeviceKey(bin) {
+    const result = await runAction(
+      () => apiRequest(`/api/bins/${bin._id}/regenerate-key`, { method: 'PUT', token }),
+      'Device key rotated'
+    );
+    if (result?.data?.deviceApiKey) {
+      setCreatedKey({ binCode: result.data.code || bin.code, value: result.data.deviceApiKey });
+      setKeyCopied(false);
+    }
+  }
+
+  async function copyExistingDeviceKey(bin) {
+    const result = await runAction(
+      () => apiRequest(`/api/bins/${bin._id}/device-key`, { token }),
+      'Device key ready'
+    );
+    if (!result?.data?.deviceApiKey) return;
+
+    const nextKey = {
+      binCode: result.data.code || bin.code,
+      value: result.data.deviceApiKey,
+    };
+    setCreatedKey(nextKey);
+    try {
+      await navigator.clipboard.writeText(nextKey.value);
+      setKeyCopied(true);
+    } catch {
+      setKeyCopied(false);
+    }
+  }
+
+  async function copyDeviceKey() {
+    if (!createdKey?.value) return;
+    await navigator.clipboard.writeText(createdKey.value);
+    setKeyCopied(true);
   }
 
   return (
@@ -1233,7 +1469,6 @@ function AdminBinTools({ data, token, runAction, loading }) {
         <AdminForm title="Add bin" eyebrow="Stations" onSubmit={createBin}>
           <label>Code<input name="code" placeholder="BIN-A01" required /></label>
           <label>Location<input name="location" placeholder="Main gate" /></label>
-          <label>Capacity<input name="capacity" type="number" min="1" defaultValue="100" /></label>
           <fieldset>
             <legend>Accepted waste</legend>
             {wasteTypes.map((type) => (
@@ -1249,17 +1484,40 @@ function AdminBinTools({ data, token, runAction, loading }) {
       )}
 
       {createdKey && (
-        <section className="panel highlight-panel">
-          <p className="eyebrow">Save or display this value</p>
-          <code>{createdKey}</code>
+        <section className="panel highlight-panel device-key-panel">
+          <div>
+            <p className="eyebrow">Device key for {createdKey.binCode}</p>
+            <h3>Copy this key now</h3>
+          </div>
+          <code>{createdKey.value}</code>
+          <div className="device-key-actions">
+            <button type="button" className="primary-button" onClick={copyDeviceKey}>
+              {keyCopied ? 'Copied!' : 'Copy device key'}
+            </button>
+            <button type="button" className="secondary-button" onClick={() => setCreatedKey(null)}>
+              Done
+            </button>
+          </div>
+          <p className="device-key-warning">
+            Paste this key only into the matching bin display. Keep it private because it authorizes that station.
+          </p>
         </section>
       )}
+
+      <div className="content-tabs" role="tablist" aria-label="Bin status views">
+        <button type="button" className={binTab === 'active' ? 'active' : ''} onClick={() => setBinTab('active')}>
+          Active bins <span>{activeBins.length}</span>
+        </button>
+        <button type="button" className={binTab === 'inactive' ? 'active' : ''} onClick={() => setBinTab('inactive')}>
+          Inactive bins <span>{inactiveBins.length}</span>
+        </button>
+      </div>
 
       <section className="panel">
         <div className="section-heading">
           <div>
             <p className="eyebrow">All stations</p>
-            <h3>{data.bins.length} registered bins</h3>
+            <h3>{displayedBins.length} {binTab} {displayedBins.length === 1 ? 'bin' : 'bins'}</h3>
           </div>
         </div>
         <div className="table-wrap">
@@ -1268,82 +1526,75 @@ function AdminBinTools({ data, token, runAction, loading }) {
               <tr>
                 <th>Code</th>
                 <th>Location</th>
-                <th>Fill</th>
+                <th>Capacity status</th>
                 <th>Status</th>
                 <th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {data.bins.map((bin) => (
+              {displayedBins.map((bin) => (
                 <tr key={bin._id}>
                   <td>{bin.code}</td>
                   <td>{bin.location || 'Unassigned'}</td>
                   <td>
-                    <div className="bin-fill-control">
-                      <div className="bin-fill-label">
-                        <strong>{levels[bin._id] ?? bin.fillLevel ?? 0}%</strong>
-                        <span className={(Number(levels[bin._id] ?? bin.fillLevel ?? 0) >= 100) ? 'capacity-full' : (Number(levels[bin._id] ?? bin.fillLevel ?? 0) >= 90 ? 'capacity-warning' : 'capacity-ok')}>
-                          {Number(levels[bin._id] ?? bin.fillLevel ?? 0) >= 100 ? 'Full capacity' : Number(levels[bin._id] ?? bin.fillLevel ?? 0) >= 90 ? 'Almost full' : 'Available'}
-                        </span>
-                      </div>
-                      <div className="bin-fill-meter"><i style={{ width: `${Math.min(100, Number(levels[bin._id] ?? bin.fillLevel ?? 0))}%` }} /></div>
-                      <input
-                        className="tiny-input"
-                        type="number"
-                        min="0"
-                        max="100"
-                        value={levels[bin._id] ?? bin.fillLevel ?? 0}
-                        onChange={(event) => setLevels({ ...levels, [bin._id]: event.target.value })}
-                        aria-label={`Fill level for ${bin.code}`}
-                      />
+                    <div className="bin-capacity-state">
+                      <span className={(bin.isFull || bin.status === 'needs_collection') ? 'capacity-full' : 'capacity-ok'}>
+                        {(bin.isFull || bin.status === 'needs_collection') ? 'Full' : 'Available'}
+                      </span>
+                      <small>{bin.lastSensorUpdateAt ? `Sensor updated ${formatDate(bin.lastSensorUpdateAt)}` : 'Waiting for sensor report'}</small>
                     </div>
                   </td>
-                  <td>{bin.status}</td>
+                  <td>
+                    <span className={`badge ${bin.status === 'inactive' ? 'danger' : 'success'}`}>
+                      {bin.status === 'needs_collection' ? 'Needs collection' : bin.status === 'inactive' ? 'Inactive' : 'Active'}
+                    </span>
+                  </td>
                   <td className="row-actions">
                     <button
                       type="button"
                       className="secondary-button small"
-                      onClick={() =>
-                        runAction(
-                          () => apiRequest(`/api/bins/${bin._id}/fill-level`, {
-                            method: 'PUT',
-                            token,
-                            body: { fillLevel: Number(levels[bin._id] ?? bin.fillLevel ?? 0) },
-                          }),
-                          'Fill level updated'
-                        )
-                      }
+                      onClick={() => copyExistingDeviceKey(bin)}
                     >
-                      Set fill
+                      Copy key
                     </button>
                     <button
                       type="button"
                       className="secondary-button small"
-                      onClick={() =>
-                        runAction(
-                          () => apiRequest(`/api/bins/${bin._id}/regenerate-key`, { method: 'PUT', token }),
-                          'Device key rotated'
-                        )
-                      }
+                      onClick={() => rotateDeviceKey(bin)}
                     >
                       Rotate key
                     </button>
-                    <button
-                      type="button"
-                      className="danger-button small"
-                      onClick={() =>
-                        runAction(
-                          () => apiRequest(`/api/bins/${bin._id}`, { method: 'DELETE', token }),
-                          'Bin deactivated'
-                        )
-                      }
-                    >
-                      Deactivate
-                    </button>
+                    {bin.status === 'inactive' ? (
+                      <button
+                        type="button"
+                        className="primary-button small"
+                        onClick={() =>
+                          runAction(
+                            () => apiRequest(`/api/bins/${bin._id}/reactivate`, { method: 'PUT', token }),
+                            'Bin reactivated'
+                          )
+                        }
+                      >
+                        Reactivate
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="danger-button small"
+                        onClick={() =>
+                          runAction(
+                            () => apiRequest(`/api/bins/${bin._id}`, { method: 'DELETE', token }),
+                            'Bin deactivated'
+                          )
+                        }
+                      >
+                        Deactivate
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
-              {data.bins.length === 0 && <TableEmpty colSpan={5} text="No bins found." />}
+              {displayedBins.length === 0 && <TableEmpty colSpan={5} text={`No ${binTab} bins found.`} />}
             </tbody>
           </table>
         </div>
@@ -1354,18 +1605,19 @@ function AdminBinTools({ data, token, runAction, loading }) {
 
 function AdminQuestTools({ quests, token, runAction, loading }) {
   const [showAddModal, setShowAddModal] = useState(false);
+  const [editingQuest, setEditingQuest] = useState(null);
   const [questTab, setQuestTab] = useState('current');
   const now = new Date();
   const currentQuests = quests.filter((quest) => quest.status !== 'closed' && new Date(quest.expiryDate) >= now);
   const historicalQuests = quests.filter((quest) => quest.status === 'closed' || new Date(quest.expiryDate) < now);
 
-  async function createQuest(event) {
+  async function saveQuest(event) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const wasteType = form.get('wasteType');
     const targetCount = form.get('targetCount') ? Number(form.get('targetCount')) : null;
-    const targetWeightKg = form.get('targetWeightKg') ? Number(form.get('targetWeightKg')) : null;
-    if (!targetCount && !targetWeightKg) {
+    const targetWeightGrams = form.get('targetWeightGrams') ? Number(form.get('targetWeightGrams')) : null;
+    if (!targetCount && !targetWeightGrams) {
       const targetInput = event.currentTarget.querySelector('[name="targetCount"]');
       targetInput.setCustomValidity('Enter an item target or a weight target.');
       targetInput.reportValidity();
@@ -1373,34 +1625,48 @@ function AdminQuestTools({ quests, token, runAction, loading }) {
       return;
     }
     const result = await runAction(
-      () => apiRequest('/api/quests', {
-        method: 'POST',
+      () => apiRequest(editingQuest ? `/api/quests/${editingQuest._id}` : '/api/quests', {
+        method: editingQuest ? 'PUT' : 'POST',
         token,
         body: {
           title: form.get('title'),
           description: form.get('description'),
           wasteType: wasteType || null,
           targetCount,
-          targetWeightKg,
+          targetWeightGrams,
           pointsReward: Number(form.get('pointsReward')),
           startDate: form.get('startDate'),
           expiryDate: form.get('expiryDate'),
           frequency: form.get('frequency'),
         },
       }),
-      'Quest created'
+      editingQuest ? 'Quest updated' : 'Quest created'
     );
     if (result) {
       event.currentTarget.reset();
       setShowAddModal(false);
+      setEditingQuest(null);
     }
+  }
+
+  function openQuestEditor(quest) {
+    setEditingQuest(quest);
+    setShowAddModal(true);
+  }
+
+  async function removeQuest(quest) {
+    if (!window.confirm(`Delete "${quest.title}"? This also removes its participant history.`)) return;
+    await runAction(
+      () => apiRequest(`/api/quests/${quest._id}`, { method: 'DELETE', token }),
+      'Quest deleted'
+    );
   }
 
   return (
     <div className="view-stack">
       <div className="list-toolbar">
         <div><p className="eyebrow">Community goals</p><h3>Quest schedule</h3></div>
-        <button type="button" className="primary-button" onClick={() => setShowAddModal(true)}>+ Add quest</button>
+        <button type="button" className="primary-button" onClick={() => { setEditingQuest(null); setShowAddModal(true); }}>+ Add quest</button>
       </div>
       <div className="content-tabs" role="tablist" aria-label="Quest views">
         <button type="button" role="tab" aria-selected={questTab === 'current'} className={questTab === 'current' ? 'active' : ''} onClick={() => setQuestTab('current')}>
@@ -1410,26 +1676,26 @@ function AdminQuestTools({ quests, token, runAction, loading }) {
           History <span>{historicalQuests.length}</span>
         </button>
       </div>
-      <QuestView quests={questTab === 'current' ? currentQuests : historicalQuests} session={null} admin history={questTab === 'history'} />
+      <QuestView quests={questTab === 'current' ? currentQuests : historicalQuests} session={null} admin history={questTab === 'history'} onEdit={openQuestEditor} onDelete={removeQuest} />
       {showAddModal && (
-      <Modal title="Schedule a quest" eyebrow="New community goal" onClose={() => setShowAddModal(false)}>
-      <AdminForm title="Quest details" eyebrow="Schedule" onSubmit={createQuest}>
-        <label>Title<input name="title" placeholder="Plastic Patrol" required /></label>
-        <label>Description<input name="description" placeholder="Collect clean plastic waste" /></label>
+      <Modal title={editingQuest ? 'Edit quest' : 'Schedule a quest'} eyebrow={editingQuest ? 'Update community goal' : 'New community goal'} onClose={() => { setShowAddModal(false); setEditingQuest(null); }}>
+      <AdminForm title="Quest details" eyebrow="Schedule" onSubmit={saveQuest}>
+        <label>Title<input name="title" placeholder="Plastic Patrol" defaultValue={editingQuest?.title || ''} required /></label>
+        <label>Description<input name="description" placeholder="Collect clean plastic waste" defaultValue={editingQuest?.description || ''} /></label>
         <label>
           Waste type
-          <select name="wasteType">
+          <select name="wasteType" defaultValue={editingQuest?.wasteType || ''}>
             <option value="">Any waste</option>
             {wasteTypes.map((type) => <option key={type}>{type}</option>)}
           </select>
         </label>
-        <label>Item target <span>(optional)</span><input name="targetCount" type="number" min="1" placeholder="None" /></label>
-        <label>Weight target in kg <span>(optional)</span><input name="targetWeightKg" type="number" min="0.001" step="0.001" placeholder="None" /></label>
-        <label>Reward points<input name="pointsReward" type="number" min="0" defaultValue="50" required /></label>
-        <label>Quest type<select name="frequency" defaultValue="daily"><option value="daily">Daily quest</option><option value="weekly">Weekly quest</option></select></label>
-        <label>Starts<input name="startDate" type="datetime-local" required /></label>
-        <label>Ends<input name="expiryDate" type="datetime-local" required /></label>
-        <button className="primary-button" type="submit" disabled={loading}>Create quest</button>
+        <label>Item target <span>(optional)</span><input name="targetCount" type="number" min="1" placeholder="None" defaultValue={editingQuest?.targetCount || ''} /></label>
+        <label>Weight target in grams <span>(optional)</span><input name="targetWeightGrams" type="number" min="1" step="1" placeholder="None" defaultValue={editingQuest ? (editingQuest.targetWeightGrams || Number(editingQuest.targetWeightKg || 0) * 1000 || '') : ''} /></label>
+        <label>Reward points<input name="pointsReward" type="number" min="0" defaultValue={editingQuest?.pointsReward ?? 50} required /></label>
+        <label>Quest type<select name="frequency" defaultValue={editingQuest?.frequency || 'daily'}><option value="daily">Daily quest</option><option value="weekly">Weekly quest</option></select></label>
+        <label>Starts<input name="startDate" type="datetime-local" defaultValue={formatDateTimeLocal(editingQuest?.startDate)} required /></label>
+        <label>Ends<input name="expiryDate" type="datetime-local" defaultValue={formatDateTimeLocal(editingQuest?.expiryDate)} required /></label>
+        <button className="primary-button" type="submit" disabled={loading}>{editingQuest ? 'Save changes' : 'Create quest'}</button>
       </AdminForm>
       </Modal>
       )}
@@ -1509,7 +1775,82 @@ function AdminRewardCatalog({ rewards }) {
   );
 }
 
-function QuestView({ quests, session, admin = false, history = false }) {
+function getQuestTargetLabel(quest) {
+  const targets = [];
+  if (quest.targetCount) targets.push(`${quest.targetCount} ${quest.targetCount === 1 ? 'item' : 'items'}`);
+  const targetGrams = quest.targetWeightGrams || Number(quest.targetWeightKg || 0) * 1000;
+  if (targetGrams) targets.push(`${targetGrams} g`);
+  return targets.join(' + ') || 'No target';
+}
+
+function QuestHistoryTable({ quests, session, admin, onEdit, onDelete }) {
+  const orderedQuests = [...quests].sort((a, b) => new Date(b.expiryDate) - new Date(a.expiryDate));
+  return (
+    <div className="table-wrap quest-history-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Quest</th>
+            <th>Result</th>
+            <th>Target</th>
+            <th>{admin ? 'Participation' : 'Your progress'}</th>
+            <th>Reward</th>
+            <th>{admin ? 'Period' : 'Completed'}</th>
+            {admin && <th>Actions</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {orderedQuests.map((quest) => {
+            const participant = quest.participants?.find((entry) => {
+              const participantId = entry.user?._id || entry.user;
+              return participantId?.toString() === session?._id?.toString();
+            });
+            const expired = new Date(quest.expiryDate) < new Date();
+            const resultLabel = admin
+              ? expired ? 'Expired' : 'Closed'
+              : participant?.completed ? 'Completed' : 'Ended';
+            const progressParts = [];
+            if (!admin && quest.targetCount) progressParts.push(`${participant?.progress || 0}/${quest.targetCount} items`);
+            const targetGrams = quest.targetWeightGrams || Number(quest.targetWeightKg || 0) * 1000;
+            const progressGrams = participant?.weightProgressGrams || Number(participant?.weightProgressKg || 0) * 1000;
+            if (!admin && targetGrams) progressParts.push(`${Math.round(progressGrams)}/${targetGrams} g`);
+
+            return (
+              <tr key={quest._id}>
+                <td>
+                  <strong>{quest.title}</strong>
+                  <span className="cell-subtitle">{quest.frequency || 'daily'} · {quest.wasteType || 'Any waste'}</span>
+                </td>
+                <td><span className={`badge ${resultLabel === 'Completed' ? 'success' : ''}`}>{resultLabel}</span></td>
+                <td>{getQuestTargetLabel(quest)}</td>
+                <td>
+                  {admin
+                    ? `${quest.completedCount || 0} completed / ${quest.participantCount || 0} tracked`
+                    : progressParts.join(' · ') || 'Target completed'}
+                </td>
+                <td><strong>{quest.pointsReward} pts</strong></td>
+                <td>
+                  {admin ? (
+                    <><span>{formatDate(quest.startDate)}</span><span className="cell-subtitle">to {formatDate(quest.expiryDate)}</span></>
+                  ) : formatDate(participant?.completedAt || quest.expiryDate)}
+                </td>
+                {admin && (
+                  <td className="row-actions">
+                    <button type="button" className="secondary-button small" onClick={() => onEdit(quest)}>Edit</button>
+                    <button type="button" className="danger-button small" onClick={() => onDelete(quest)}>Delete</button>
+                  </td>
+                )}
+              </tr>
+            );
+          })}
+          {quests.length === 0 && <TableEmpty colSpan={admin ? 7 : 6} text={admin ? 'No expired or closed quests yet.' : 'No completed quests yet.'} />}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function QuestView({ quests, session, admin = false, history = false, onEdit, onDelete }) {
   const [residentQuestTab, setResidentQuestTab] = useState('current');
   const residentQuestRows = quests.map((quest) => {
     const participant = quest.participants?.find((entry) => {
@@ -1542,7 +1883,10 @@ function QuestView({ quests, session, admin = false, history = false }) {
           </button>
         </div>
       )}
-      <div className="item-grid">
+      {(history || (!admin && residentQuestTab === 'completed')) ? (
+        <QuestHistoryTable quests={visibleQuests} session={session} admin={admin} onEdit={onEdit} onDelete={onDelete} />
+      ) : (
+      <div className={`item-grid ${admin ? 'quest-card-grid' : ''}`}>
         {visibleQuests.length === 0 && <EmptyState text={history ? 'No expired or closed quests yet.' : !admin && residentQuestTab === 'completed' ? 'No completed quests yet.' : 'No quests are available right now.'} />}
         {visibleQuests.map((quest) => {
           const participantCount = quest.participantCount ?? quest.participants?.length ?? 0;
@@ -1551,15 +1895,26 @@ function QuestView({ quests, session, admin = false, history = false }) {
             return participantId?.toString() === session?._id?.toString();
           });
           const progress = userProgress?.progress || 0;
-          const weightProgress = userProgress?.weightProgressKg || 0;
+          const weightProgress = userProgress?.weightProgressGrams || Number(userProgress?.weightProgressKg || 0) * 1000;
+          const targetWeightGrams = quest.targetWeightGrams || Number(quest.targetWeightKg || 0) * 1000;
           const countPercent = quest.targetCount ? Math.min(100, Math.round((progress / quest.targetCount) * 100)) : 100;
-          const weightPercent = quest.targetWeightKg ? Math.min(100, Math.round((weightProgress / quest.targetWeightKg) * 100)) : 100;
+          const weightPercent = targetWeightGrams ? Math.min(100, Math.round((weightProgress / targetWeightGrams) * 100)) : 100;
           const progressPercent = Math.min(countPercent, weightPercent);
+          const wasteObjective = quest.wasteType || 'accepted waste';
+          const countObjective = quest.targetCount
+            ? `${quest.targetCount} ${wasteObjective.toLowerCase()} item${quest.targetCount === 1 ? '' : 's'}`
+            : '';
+          const weightObjective = targetWeightGrams ? `${targetWeightGrams} g of ${wasteObjective.toLowerCase()}` : '';
+          const objectiveText = countObjective && weightObjective
+            ? `Drop ${countObjective} with a total weight of ${targetWeightGrams} g.`
+            : countObjective ? `Drop ${countObjective}.` : `Drop ${weightObjective}.`;
+          const remainingItems = Math.max(0, Number(quest.targetCount || 0) - progress);
+          const remainingGrams = Math.max(0, targetWeightGrams - weightProgress);
           const isScheduled = quest.startDate && new Date(quest.startDate) > new Date();
           const isExpired = new Date(quest.expiryDate) < new Date();
 
           return (
-            <article className="item-card" key={quest._id}>
+            <article className="item-card quest-card" key={quest._id}>
               <div>
                 <span className="badge">{quest.frequency || 'daily'}</span>{' '}
                 <span className="badge">{isExpired ? 'expired' : isScheduled ? 'scheduled' : quest.status}</span>{' '}
@@ -1567,33 +1922,102 @@ function QuestView({ quests, session, admin = false, history = false }) {
                 <h4>{quest.title}</h4>
                 <p>{quest.description || 'Complete the target before the expiry date.'}</p>
               </div>
-              <dl>
+              {!admin && (
+                <div className="quest-objective">
+                  <span>Objective</span>
+                  <strong>{objectiveText}</strong>
+                  <small>Only claimed {wasteObjective.toLowerCase()} disposals count toward this quest.</small>
+                </div>
+              )}
+              <dl className={`quest-stat-grid ${!admin ? 'resident-quest-stats' : ''}`}>
+                {admin && <>
                 <div><dt>Item target</dt><dd>{quest.targetCount || 'None'}</dd></div>
-                <div><dt>Weight target</dt><dd>{quest.targetWeightKg ? `${quest.targetWeightKg} kg` : 'None'}</dd></div>
+                <div><dt>Weight target</dt><dd>{targetWeightGrams ? `${targetWeightGrams} g` : 'None'}</dd></div>
+                </>}
                 <div><dt>Reward</dt><dd>{quest.pointsReward} pts</dd></div>
                 <div><dt>{admin ? 'Tracked' : 'Items'}</dt><dd>{admin ? participantCount : quest.targetCount ? `${progress}/${quest.targetCount}` : 'Not required'}</dd></div>
-                {!admin && <div><dt>Weight</dt><dd>{quest.targetWeightKg ? `${weightProgress.toFixed(2)}/${quest.targetWeightKg} kg` : 'Not required'}</dd></div>}
-                {admin && <div><dt>Starts</dt><dd>{formatDate(quest.startDate)}</dd></div>}
-                {admin && <div><dt>Ends</dt><dd>{formatDate(quest.expiryDate)}</dd></div>}
+                {!admin && <div><dt>Weight</dt><dd>{targetWeightGrams ? `${Math.round(weightProgress)}/${targetWeightGrams} g` : 'Not required'}</dd></div>}
+                {admin && <div><dt>Completed</dt><dd>{quest.completedCount || 0}</dd></div>}
               </dl>
+              {admin && (
+                <div className="quest-schedule-row">
+                  <span><small>Starts</small>{formatDate(quest.startDate)}</span>
+                  <i>→</i>
+                  <span><small>Ends</small>{formatDate(quest.expiryDate)}</span>
+                </div>
+              )}
+              {admin && (
+                <div className="quest-completers">
+                  <strong>Completed by</strong>
+                  {quest.completedParticipants?.length ? (
+                    <div>{quest.completedParticipants.map((resident) => <span key={`${quest._id}-${resident._id}`}>{resident.name}</span>)}</div>
+                  ) : <small>No residents have completed this quest yet.</small>}
+                </div>
+              )}
+              {admin && (
+                <div className="quest-card-actions">
+                  <button type="button" className="secondary-button" onClick={() => onEdit(quest)}>Edit quest</button>
+                  <button type="button" className="danger-button" onClick={() => onDelete(quest)}>Delete</button>
+                </div>
+              )}
               {!admin && (
                 <div className="quest-progress">
                   <div className="progress-wrap">
                     <span style={{ width: `${progressPercent}%` }} />
                     <strong>{userProgress?.completed ? 'Completed' : `${progressPercent}%`}</strong>
                   </div>
-                  <p>{userProgress?.completed ? 'Reward points added automatically.' : 'Progress updates when you claim matching waste.'}</p>
+                  <p>{userProgress?.completed
+                    ? 'Reward points added automatically.'
+                    : `${remainingItems ? `${remainingItems} item${remainingItems === 1 ? '' : 's'}` : ''}${remainingItems && remainingGrams ? ' and ' : ''}${remainingGrams ? `${Math.ceil(remainingGrams)} g` : ''} remaining. Progress updates after you claim the session.`}</p>
                 </div>
               )}
             </article>
           );
         })}
       </div>
+      )}
     </section>
   );
 }
 
-function RewardView({ rewards, token, runAction }) {
+function RewardView({ rewards, points, token, runAction }) {
+  const [selectedReward, setSelectedReward] = useState(null);
+  const [verifiedPoints, setVerifiedPoints] = useState(points);
+  const [checkingBalance, setCheckingBalance] = useState(false);
+  const canAffordSelected = selectedReward && verifiedPoints >= selectedReward.pointsCost;
+
+  async function openRewardConfirmation(reward) {
+    setCheckingBalance(true);
+    try {
+      const profile = await apiRequest('/api/auth/me', { token });
+      setVerifiedPoints(Number(profile.data?.points || 0));
+      setSelectedReward(reward);
+    } catch {
+      setVerifiedPoints(Number(points || 0));
+      setSelectedReward(reward);
+    } finally {
+      setCheckingBalance(false);
+    }
+  }
+
+  async function confirmRedemption() {
+    if (!selectedReward || !canAffordSelected) return;
+    const result = await runAction(
+      () => apiRequest(`/api/rewards/${selectedReward._id}/redeem`, { method: 'POST', token }),
+      'Reward redeemed'
+    );
+    if (result) {
+      setSelectedReward(null);
+    } else {
+      try {
+        const profile = await apiRequest('/api/auth/me', { token });
+        setVerifiedPoints(Number(profile.data?.points || 0));
+      } catch {
+        // Keep the last verified balance if the refresh is unavailable.
+      }
+    }
+  }
+
   return (
     <section className="panel">
       <div className="section-heading">
@@ -1618,19 +2042,36 @@ function RewardView({ rewards, token, runAction }) {
             <button
               type="button"
               className="primary-button"
-              disabled={reward.status !== 'active' || reward.stock <= 0}
-              onClick={() =>
-                runAction(
-                  () => apiRequest(`/api/rewards/${reward._id}/redeem`, { method: 'POST', token }),
-                  'Reward redeemed'
-                )
-              }
+              disabled={checkingBalance || reward.status !== 'active' || reward.stock <= 0}
+              onClick={() => openRewardConfirmation(reward)}
             >
               Redeem
             </button>
           </article>
         ))}
       </div>
+      {selectedReward && (
+        <Modal title="Confirm reward" eyebrow="Before you redeem" onClose={() => setSelectedReward(null)}>
+          <div className="reward-confirmation">
+            <div className="reward-confirmation-icon">◇</div>
+            <div>
+              <p>Are you sure this is the reward you want to get?</p>
+              <h4>{selectedReward.name}</h4>
+              <small>{selectedReward.description || 'Reward available from your community admin.'}</small>
+            </div>
+            <dl>
+              <div><dt>Your points</dt><dd>{verifiedPoints} pts</dd></div>
+              <div><dt>Reward cost</dt><dd>− {selectedReward.pointsCost} pts</dd></div>
+              <div className="reward-balance"><dt>Points after redemption</dt><dd>{Math.max(0, verifiedPoints - selectedReward.pointsCost)} pts</dd></div>
+            </dl>
+            {!canAffordSelected && <p className="form-error">You do not have enough points for this reward.</p>}
+            <div className="reward-confirmation-actions">
+              <button type="button" className="secondary-button" onClick={() => setSelectedReward(null)}>Cancel</button>
+              <button type="button" className="primary-button" disabled={!canAffordSelected} onClick={confirmRedemption}>Yes, redeem reward</button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </section>
   );
 }
@@ -1835,12 +2276,24 @@ function DisposalTable({ disposals, admin = false, compact = false }) {
       {compact ? (
         <>
           {disposals.map((disposal) => (
-            <article className="claim-row" key={disposal._id}>
-              <div>
-                <strong>{disposal.wasteType}</strong>
-                <span>{disposal.bin?.code || 'Smart bin'} · {formatDate(disposal.createdAt)}</span>
+            <article className="claim-row session-history-row" key={disposal._id}>
+              <div className="session-history-main">
+                <div className="session-history-heading">
+                  <strong>{disposal.isSession ? `Session ${disposal.sessionCode || ''}`.trim() : 'Disposal claim'}</strong>
+                  <span>{disposal.bin?.code || 'Smart bin'} · {formatDate(disposal.createdAt)}</span>
+                </div>
+                <div className="session-history-items">
+                  {(disposal.items?.length ? disposal.items : [disposal]).map((item, index) => (
+                    <span key={item._id || `${disposal._id}-${index}`}>
+                      {item.wasteType} · {Math.round(Number(item.quantity || 0) * 1000)} g
+                    </span>
+                  ))}
+                </div>
               </div>
-              <b>{disposal.pointsAwarded} pts</b>
+              <div className="session-history-points">
+                <b>+{disposal.pointsAwarded} pts</b>
+                <small>{Math.round(Number(disposal.quantity || 0) * 1000)} g total</small>
+              </div>
             </article>
           ))}
           {disposals.length === 0 && <EmptyState text="No disposal records yet." />}
@@ -1863,7 +2316,7 @@ function DisposalTable({ disposals, admin = false, compact = false }) {
                 {admin && <td>{disposal.user?.name || 'Unknown'}</td>}
                 <td>{disposal.bin?.code || 'Unknown'}</td>
                 <td>{disposal.wasteType}</td>
-                <td>{disposal.quantity} kg</td>
+                <td>{Math.round(Number(disposal.quantity || 0) * 1000)} g</td>
                 <td>{disposal.pointsAwarded}</td>
                 <td>{formatDate(disposal.createdAt)}</td>
               </tr>
@@ -1888,6 +2341,13 @@ function TableEmpty({ colSpan, text }) {
       <td colSpan={colSpan} className="table-empty">{text}</td>
     </tr>
   );
+}
+
+function formatDateTimeLocal(date) {
+  if (!date) return '';
+  const value = new Date(date);
+  const pad = (number) => String(number).padStart(2, '0');
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}T${pad(value.getHours())}:${pad(value.getMinutes())}`;
 }
 
 function formatDate(date) {

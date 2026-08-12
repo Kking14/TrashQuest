@@ -1,8 +1,6 @@
 import Bin from '../models/binModel.js';
 import crypto from 'crypto';
  
-const FULL_THRESHOLD = 90; // fill % at which a bin is flagged for collection
- 
 const createBin = async (binData) => {
     const existing = await Bin.findOne({ code: binData.code });
     if (existing) {
@@ -32,6 +30,18 @@ const getBinById = async (binID) => {
     }
     return bin;
 };
+
+const getOrCreateDeviceKey = async (binID) => {
+    const bin = await Bin.findById(binID).select('+deviceApiKey');
+    if (!bin) {
+        throw new Error('Bin not found');
+    }
+    if (!bin.deviceApiKey) {
+        bin.deviceApiKey = crypto.randomBytes(24).toString('hex');
+        await bin.save();
+    }
+    return bin;
+};
  
 const updateBin = async (binID, updateData) => {
     const bin = await Bin.findByIdAndUpdate(binID, updateData, { new: true });
@@ -41,21 +51,17 @@ const updateBin = async (binID, updateData) => {
     return bin;
 };
  
-// Called after a disposal is logged against this bin, and can also be
-// called directly by an admin/sensor integration to set the level manually.
-const updateFillLevel = async (binID, fillLevel) => {
-    if (fillLevel < 0 || fillLevel > 100) {
-        throw new Error('Fill level must be between 0 and 100');
+const updateFullStatusFromSensor = async (bin, isFull) => {
+    if (typeof isFull !== 'boolean') {
+        throw new Error('isFull must be true or false');
     }
-    const status = fillLevel >= FULL_THRESHOLD ? 'needs_collection' : 'active';
-    const bin = await Bin.findByIdAndUpdate(
-        binID,
-        { fillLevel, status },
-        { new: true }
-    );
-    if (!bin) {
-        throw new Error('Bin not found');
+    if (bin.status === 'inactive') {
+        throw new Error('This bin is currently inactive');
     }
+    bin.isFull = isFull;
+    bin.status = isFull ? 'needs_collection' : 'active';
+    bin.lastSensorUpdateAt = new Date();
+    await bin.save();
     return bin;
 };
  
@@ -70,9 +76,22 @@ const deactivateBin = async (binID) => {
     }
     return bin;
 };
+
+const reactivateBin = async (binID) => {
+    const bin = await Bin.findById(binID);
+    if (!bin) {
+        throw new Error('Bin not found');
+    }
+    if (bin.status !== 'inactive') {
+        throw new Error('This bin is already active');
+    }
+    bin.status = bin.isFull ? 'needs_collection' : 'active';
+    await bin.save();
+    return bin;
+};
  
 // For rotating a bin's device key if it's ever leaked (e.g. device stolen
-// or replaced). Returned once here, same as at creation.
+// or replaced).
 const regenerateDeviceKey = async (binID) => {
     const bin = await Bin.findById(binID).select('+deviceApiKey');
     if (!bin) {
@@ -88,9 +107,10 @@ export {
     getAllBins,
     getBinByCode,
     getBinById,
+    getOrCreateDeviceKey,
     updateBin,
-    updateFillLevel,
+    updateFullStatusFromSensor,
     deactivateBin,
+    reactivateBin,
     regenerateDeviceKey,
-    FULL_THRESHOLD,
 };
