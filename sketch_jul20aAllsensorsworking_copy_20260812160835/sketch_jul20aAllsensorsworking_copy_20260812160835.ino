@@ -8,6 +8,8 @@ const int inductivePin = 26;    // active-low metal sensor
 const int dirPin = 32;
 const int pulPin = 33;
 const int servoPin = 25;
+const int trigPin = 27;         // HC-SR04 trigger
+const int echoPin = 14;         // HC-SR04 echo (use a 5V-to-3.3V voltage divider)
 
 const float adcMax = 4095.0;
 const float vRef = 3.3;
@@ -26,16 +28,27 @@ const int servoMaxUs = 2400;
 // Allow time for the resident to review the website classification before the
 // gateway sends sort/reject. No motor moves while the controller is waiting.
 const unsigned long commandTimeoutMs = 120000;
+const float fullDistanceCm = 10.0;
+const int fullnessConfirms = 3;
+const unsigned long fullnessSampleIntervalMs = 1000;
+const unsigned long fullnessHeartbeatMs = 60000;
 
 bool waitingForCommand = false;
 bool waitForRemoval = false;
 int confirmCount = 0;
 String activeDetectionId;
 unsigned long commandStartedAt = 0;
+unsigned long lastFullnessSampleAt = 0;
+unsigned long lastFullnessReportAt = 0;
+int fullConfirmCount = 0;
+int availableConfirmCount = 0;
+bool reportedFull = false;
+bool hasFullnessReport = false;
 
 void moveServoTo(int targetAngle);
 void stepMotor(int steps, bool direction);
 float getMedianDistance();
+void updateFullness();
 
 void sendEvent(const char *eventName, const String &detectionId, bool success = true) {
   JsonDocument message;
@@ -66,6 +79,9 @@ void setup() {
   pinMode(inductivePin, INPUT_PULLUP);
   pinMode(dirPin, OUTPUT);
   pinMode(pulPin, OUTPUT);
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  digitalWrite(trigPin, LOW);
   digitalWrite(dirPin, LOW);
   digitalWrite(pulPin, LOW);
   ledcAttach(servoPin, servoFreq, servoResolution);
@@ -143,6 +159,7 @@ void handleCommand() {
 
 void loop() {
   handleCommand();
+  updateFullness();
 
   float distanceCm = getMedianDistance();
   bool objectPresent = distanceCm >= minDetectDistance && distanceCm <= maxDetectDistance;
@@ -175,6 +192,51 @@ void loop() {
     sendObjectReady(metal, objectPresent);
   }
   delay(50);
+}
+
+void updateFullness() {
+  unsigned long now = millis();
+  if (now - lastFullnessSampleAt < fullnessSampleIntervalMs) return;
+  lastFullnessSampleAt = now;
+
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  unsigned long duration = pulseIn(echoPin, HIGH, 30000);
+  if (duration == 0) return;
+  float distanceCm = duration * 0.0343 / 2.0;
+  if (distanceCm < 1.0 || distanceCm > 400.0) return;
+
+  bool fullNow = distanceCm <= fullDistanceCm;
+  if (fullNow) {
+    fullConfirmCount++;
+    availableConfirmCount = 0;
+  } else {
+    availableConfirmCount++;
+    fullConfirmCount = 0;
+  }
+
+  bool confirmed = fullConfirmCount >= fullnessConfirms ||
+                   availableConfirmCount >= fullnessConfirms;
+  if (!confirmed) return;
+
+  bool shouldReport = !hasFullnessReport || reportedFull != fullNow ||
+                      now - lastFullnessReportAt >= fullnessHeartbeatMs;
+  if (!shouldReport) return;
+
+  JsonDocument message;
+  message["event"] = "bin_fullness";
+  message["isFull"] = fullNow;
+  message["distanceCm"] = round(distanceCm * 10.0) / 10.0;
+  serializeJson(message, Serial);
+  Serial.println();
+
+  reportedFull = fullNow;
+  hasFullnessReport = true;
+  lastFullnessReportAt = now;
 }
 
 void stepMotor(int steps, bool direction) {

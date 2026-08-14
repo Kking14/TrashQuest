@@ -72,6 +72,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [toasts, setToasts] = useState([]);
   const toastTimers = useRef(new Map());
+  const previousBinFullness = useRef(new Map());
   const [data, setData] = useState({
     profile: null,
     bins: [],
@@ -96,6 +97,39 @@ function App() {
     if (!token) return;
     refreshData();
   }, [token]);
+
+  useEffect(() => {
+    if (!token || !isAdmin) return;
+    let stopped = false;
+    async function pollBinCapacity() {
+      try {
+        const response = await apiRequest('/api/bins', { token });
+        const bins = response.data || [];
+        if (stopped) return;
+        for (const bin of bins) {
+          const isFull = Boolean(bin.isFull || bin.status === 'needs_collection');
+          const wasFull = previousBinFullness.current.get(bin._id);
+          if (wasFull === false && isFull) {
+            showToast({
+              title: 'Bin full — collection needed',
+              message: `${bin.code}${bin.location ? ` at ${bin.location}` : ''} has reached full capacity.`,
+              tone: 'error',
+              duration: 12000,
+            });
+          }
+          previousBinFullness.current.set(bin._id, isFull);
+        }
+        setData((current) => ({ ...current, bins }));
+      } catch {
+        // The normal API error state remains available on manual refresh.
+      }
+    }
+    const timer = window.setInterval(pollBinCapacity, 10000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [token, isAdmin]);
 
   useEffect(() => () => {
     toastTimers.current.forEach((timer) => window.clearTimeout(timer));
@@ -143,6 +177,14 @@ function App() {
       const updatedSession = { ...session, ...nextData.profile, token };
       localStorage.setItem('trashquest_session', JSON.stringify(updatedSession));
       setSession(updatedSession);
+    }
+    if (isAdmin && previousBinFullness.current.size === 0) {
+      nextData.bins.forEach((bin) => {
+        previousBinFullness.current.set(
+          bin._id,
+          Boolean(bin.isFull || bin.status === 'needs_collection')
+        );
+      });
     }
     setData(nextData);
     setLoading(false);

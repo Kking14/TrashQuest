@@ -164,6 +164,20 @@ estimates (paper 80 g, plastic 45 g, tin can 25 g). Add a calibrated load-cell
 reading as `grams` in the ESP32 `object_ready` message when that component is
 available.
 
+### Ultrasonic full-bin reporting
+
+The ESP32 sketch supports one HC-SR04 capacity sensor with trigger on GPIO 27
+and echo on GPIO 14. Because HC-SR04 echo is 5 V, connect it to the ESP32 through
+a voltage divider that reduces the signal to 3.3 V. The sensor should face down
+from the top of the container.
+
+The default full threshold is 10 cm (`fullDistanceCm` in the sketch). Three
+consecutive readings are required before the state changes. The ESP32 reports
+changes immediately and sends a heartbeat every 60 seconds. The gateway updates
+the authenticated bin through `/api/bins/sensor/full-status`; the admin dashboard
+polls every 10 seconds, marks the bin **Full / Needs collection**, and displays a
+notification when it changes from available to full.
+
 ### One-click Windows launcher
 
 After completing the configuration above, double-click `start-trashquest.cmd`

@@ -85,6 +85,38 @@ def backend_claim(detection_id: str, waste_type: str, grams: int) -> dict:
         raise RuntimeError(f"Backend is unavailable: {error.reason}") from error
 
 
+def backend_fullness(is_full: bool, distance_cm: float | None = None) -> None:
+    try:
+        if not DEVICE_KEY:
+            raise RuntimeError("TQ_DEVICE_KEY is not configured")
+        payload = json.dumps({"isFull": is_full}).encode()
+        request = Request(
+            f"{BACKEND_URL}/api/bins/sensor/full-status",
+            data=payload,
+            method="PUT",
+            headers={"Content-Type": "application/json", "X-Device-Key": DEVICE_KEY},
+        )
+        with urlopen(request, timeout=8) as response:
+            result = json.load(response)["data"]
+        station_status.update(
+            binFull=is_full,
+            fullnessDistanceCm=distance_cm,
+            lastFullnessReportAt=time.time(),
+        )
+        publish({
+            "type": "bin_fullness", "isFull": is_full,
+            "distanceCm": distance_cm, "bin": result,
+        })
+        print(f"Backend <- bin fullness: {'FULL' if is_full else 'available'} ({distance_cm} cm)")
+    except HTTPError as error:
+        detail = error.read().decode(errors="replace")
+        station_status["lastError"] = f"Fullness report HTTP {error.code}: {detail}"
+    except (URLError, OSError) as error:
+        station_status["lastError"] = f"Fullness report failed: {error}"
+    except RuntimeError as error:
+        station_status["lastError"] = str(error)
+
+
 class GatewayHandler(BaseHTTPRequestHandler):
     def _json(self, status: int, body: dict) -> None:
         data = json.dumps(body).encode()
@@ -192,6 +224,13 @@ def serial_reader(device: serial.Serial) -> None:
             if not line:
                 continue
             message = json.loads(line)
+            if message.get("event") == "bin_fullness":
+                threading.Thread(
+                    target=backend_fullness,
+                    args=(bool(message.get("isFull")), message.get("distanceCm")),
+                    daemon=True,
+                ).start()
+                continue
             serial_events.put(message)
             print("ESP32 ->", message)
         except json.JSONDecodeError:
