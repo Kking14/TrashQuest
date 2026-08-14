@@ -108,8 +108,9 @@ function App() {
         if (stopped) return;
         for (const bin of bins) {
           const isFull = Boolean(bin.isFull || bin.status === 'needs_collection');
-          const wasFull = previousBinFullness.current.get(bin._id);
-          if (wasFull === false && isFull) {
+          const changeMarker = bin.fullnessChangedAt || bin.lastSensorUpdateAt || null;
+          const previous = previousBinFullness.current.get(bin._id);
+          if (isFull && previous?.changeMarker && previous.changeMarker !== changeMarker) {
             showToast({
               title: 'Bin full — collection needed',
               message: `${bin.code}${bin.location ? ` at ${bin.location}` : ''} has reached full capacity.`,
@@ -117,7 +118,7 @@ function App() {
               duration: 12000,
             });
           }
-          previousBinFullness.current.set(bin._id, isFull);
+          previousBinFullness.current.set(bin._id, { isFull, changeMarker });
         }
         setData((current) => ({ ...current, bins }));
       } catch {
@@ -182,7 +183,10 @@ function App() {
       nextData.bins.forEach((bin) => {
         previousBinFullness.current.set(
           bin._id,
-          Boolean(bin.isFull || bin.status === 'needs_collection')
+          {
+            isFull: Boolean(bin.isFull || bin.status === 'needs_collection'),
+            changeMarker: bin.fullnessChangedAt || bin.lastSensorUpdateAt || null,
+          }
         );
       });
     }
@@ -1467,6 +1471,7 @@ function AdminApp({ data, loading, logout, notice, refreshData, runAction, sessi
     { id: 'admin-rewards', label: 'Rewards', icon: '◇' },
     { id: 'admin-users', label: 'Residents', icon: '◎' },
   ];
+  const fullBins = data.bins.filter((bin) => bin.isFull || bin.status === 'needs_collection');
 
   return (
     <main className="app-shell">
@@ -1515,6 +1520,16 @@ function AdminApp({ data, loading, logout, notice, refreshData, runAction, sessi
         </header>
 
         {notice && <div className="notice">{notice}</div>}
+        {fullBins.length > 0 && (
+          <section className="capacity-alert" role="alert" aria-live="assertive">
+            <span aria-hidden="true">!</span>
+            <div>
+              <strong>{fullBins.length} smart {fullBins.length === 1 ? 'bin requires' : 'bins require'} collection</strong>
+              <p>{fullBins.map((bin) => `${bin.code}${bin.location ? ` — ${bin.location}` : ''}`).join(', ')}</p>
+            </div>
+            <button type="button" onClick={() => setView('admin-bins')}>View bins</button>
+          </section>
+        )}
         {view === 'admin-overview' && <AdminOverview data={data} totals={totals} />}
         {view === 'admin-bins' && <AdminBinTools data={data} token={token} runAction={runAction} loading={loading} />}
         {view === 'admin-quests' && <AdminQuestTools quests={data.quests} token={token} runAction={runAction} loading={loading} />}

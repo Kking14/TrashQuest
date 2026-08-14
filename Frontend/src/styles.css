@@ -1099,6 +1099,11 @@ legend {
 .notice.compact {
   margin: 0;
 }
+.capacity-alert { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 14px; margin-bottom: 18px; border: 1px solid #efaaa3; border-radius: 16px; padding: 15px 17px; background: #fff0ee; color: #8f241d; box-shadow: 0 12px 30px rgba(143,36,29,.1); }
+.capacity-alert > span { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: #c7382f; color: #fff; font-weight: 1000; }
+.capacity-alert strong { display: block; font-size: 1rem; }
+.capacity-alert p { margin: 3px 0 0; color: #a04740; }
+.capacity-alert button { border: 1px solid #d77b74; border-radius: 10px; padding: 9px 12px; background: #fff; color: #982c24; font-weight: 850; }
 
 .item-card,
 .bin-card {
