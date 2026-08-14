@@ -4,15 +4,18 @@ import { createDisposalClaim, createDisposalSession, getDisposalSessionTokens, c
 // sensor detects a disposal. req.bin comes from authenticateDevice middleware.
 const registerDisposalClaim = async (req, res) => {
     try {
-        const { wasteType, quantity, itemCount } = req.body;
-        const { claim, pointsAvailable } = await createDisposalClaim(req.bin, wasteType, quantity, itemCount);
-        res.status(201).json({
+        const { wasteType, quantity, itemCount, detectionId } = req.body;
+        const { claim, pointsAvailable, duplicate } = await createDisposalClaim(
+            req.bin, wasteType, quantity, itemCount, detectionId
+        );
+        res.status(duplicate ? 200 : 201).json({
             success: true,
-            message: 'Disposal claim created',
+            message: duplicate ? 'Existing disposal claim returned' : 'Disposal claim created',
             data: {
                 claimToken: claim.claimToken, // this is what the bin encodes as its QR code
                 expiresAt: claim.expiresAt,
                 pointsAvailable,
+                duplicate,
             },
         });
     } catch (error) {

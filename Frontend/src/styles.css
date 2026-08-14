@@ -719,6 +719,22 @@ button:disabled {
 .kiosk-brand span { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 13px; background: var(--kiosk-lime); color: #0b261e; font-weight: 1000; box-shadow: 0 0 28px rgba(184,243,74,.22); }
 .station-status { display: flex; align-items: center; gap: 9px; color: #d5e5dd; font-size: .84rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
 .station-status i { width: 9px; height: 9px; border-radius: 50%; background: var(--kiosk-lime); box-shadow: 0 0 14px var(--kiosk-lime); }
+.ai-camera-panel { position: absolute; z-index: 5; top: 88px; left: 22px; width: min(360px, calc(100% - 44px)); overflow: hidden; border: 1px solid rgba(184,243,74,.28); border-radius: 18px; background: rgba(3,16,12,.92); box-shadow: 0 18px 50px rgba(0,0,0,.35); backdrop-filter: blur(18px); }
+.ai-camera-panel.is-closed { width: auto; }
+.ai-camera-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; }
+.ai-camera-heading > div { display: flex; align-items: center; gap: 10px; }
+.ai-camera-heading span { display: flex; align-items: center; gap: 7px; color: #fff; font-size: .78rem; font-weight: 900; letter-spacing: .07em; text-transform: uppercase; }
+.ai-camera-heading span i { width: 8px; height: 8px; border-radius: 50%; background: var(--kiosk-lime); box-shadow: 0 0 10px var(--kiosk-lime); }
+.ai-camera-heading small { color: #8ba297; font-weight: 800; }
+.ai-camera-heading button { border: 0; padding: 7px 9px; background: transparent; color: var(--kiosk-lime); font-weight: 850; cursor: pointer; }
+.ai-camera-feed { position: relative; aspect-ratio: 4 / 3; overflow: hidden; background: #020805; }
+.ai-camera-feed img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.ai-camera-empty { display: grid; place-items: center; height: 100%; padding: 24px; color: #8ba297; text-align: center; }
+.ai-camera-detections { position: absolute; right: 9px; bottom: 9px; left: 9px; display: flex; flex-wrap: wrap; gap: 6px; }
+.ai-camera-detections span { border: 1px solid rgba(184,243,74,.28); border-radius: 999px; padding: 5px 8px; background: rgba(3,16,12,.82); color: #e8f4ee; font-size: .7rem; font-weight: 800; }
+.ai-paper-hold { position: absolute; top: 10px; right: 10px; left: 10px; display: grid; gap: 6px; border-radius: 10px; padding: 8px 10px; background: rgba(3,16,12,.84); color: #fff; font-size: .72rem; text-transform: uppercase; }
+.ai-paper-hold > span { height: 5px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.15); }
+.ai-paper-hold > span i { display: block; height: 100%; border-radius: inherit; background: var(--kiosk-lime); transition: width .15s linear; }
 .kiosk-exit { justify-self: end; border: 0; background: transparent; color: #92a9a0; font-weight: 800; }
 .kiosk-stage { z-index: 1; display: grid; place-items: center; min-height: 0; padding: 38px 24px 150px; }
 .kiosk-message { width: min(880px,100%); text-align: center; animation: kiosk-enter .42s ease both; }
@@ -1083,6 +1099,11 @@ legend {
 .notice.compact {
   margin: 0;
 }
+.capacity-alert { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 14px; margin-bottom: 18px; border: 1px solid #efaaa3; border-radius: 16px; padding: 15px 17px; background: #fff0ee; color: #8f241d; box-shadow: 0 12px 30px rgba(143,36,29,.1); }
+.capacity-alert > span { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: #c7382f; color: #fff; font-weight: 1000; }
+.capacity-alert strong { display: block; font-size: 1rem; }
+.capacity-alert p { margin: 3px 0 0; color: #a04740; }
+.capacity-alert button { border: 1px solid #d77b74; border-radius: 10px; padding: 9px 12px; background: #fff; color: #982c24; font-weight: 850; }
 
 .item-card,
 .bin-card {
@@ -1456,6 +1477,7 @@ body { background: #edf3ef; }
   .quest-card-grid { grid-template-columns: 1fr; }
   .kiosk-header { grid-template-columns: 1fr auto; }
   .station-status { display: none; }
+  .ai-camera-panel { top: 76px; left: 12px; width: min(320px, calc(100% - 24px)); }
   .hardware-test-panel { grid-template-columns: 1fr; gap: 9px; text-align: center; }
   .hardware-test-panel small { display: none; }
   .kiosk-stage { padding-bottom: 190px; }
@@ -1544,6 +1566,7 @@ body { background: #edf3ef; }
   .result-actions, .classification-review > div, .hardware-test-panel > div { flex-direction: column; }
   .session-pill { top: 88px; right: 14px; }
   .hardware-test-panel { right: 12px; bottom: 12px; left: 12px; }
+  .ai-camera-panel { width: calc(100% - 24px); }
   .kiosk-qr-list { flex-wrap: wrap; }
   .kiosk-qr-list article { width: min(230px, 70vw); }
 

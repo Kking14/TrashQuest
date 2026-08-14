@@ -34,6 +34,10 @@ const binSchema = new mongoose.Schema({
         type: Date,
         default: null,
     },
+    fullnessChangedAt: {
+        type: Date,
+        default: null,
+    },
     status: {
         type: String,
         enum: ['active', 'needs_collection', 'inactive'],

@@ -87,6 +87,7 @@ const reportFullStatus = async (req, res) => {
                 isFull: bin.isFull,
                 status: bin.status,
                 lastSensorUpdateAt: bin.lastSensorUpdateAt,
+                fullnessChangedAt: bin.fullnessChangedAt,
             },
         });
     } catch (error) {

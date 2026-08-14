@@ -58,9 +58,13 @@ const updateFullStatusFromSensor = async (bin, isFull) => {
     if (bin.status === 'inactive') {
         throw new Error('This bin is currently inactive');
     }
+    const fullnessChanged = bin.isFull !== isFull;
     bin.isFull = isFull;
     bin.status = isFull ? 'needs_collection' : 'active';
     bin.lastSensorUpdateAt = new Date();
+    if (fullnessChanged || !bin.fullnessChangedAt) {
+        bin.fullnessChangedAt = bin.lastSensorUpdateAt;
+    }
     await bin.save();
     return bin;
 };

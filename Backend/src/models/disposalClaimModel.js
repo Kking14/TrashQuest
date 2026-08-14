@@ -22,6 +22,14 @@ const disposalClaimSchema = new mongoose.Schema({
         min: 1,
         default: 1,
     },
+    // Stable event ID supplied by the station gateway. Together with `bin`,
+    // this prevents a network retry from creating duplicate points.
+    detectionId: {
+        type: String,
+        trim: true,
+        maxlength: 100,
+        default: null,
+    },
     // What the bin's screen encodes as a QR code for the resident to scan
     claimToken: {
         type: String,
@@ -53,6 +61,10 @@ const disposalClaimSchema = new mongoose.Schema({
 disposalClaimSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 86400 });
 disposalClaimSchema.index({ bin: 1, status: 1, expiresAt: 1 });
 disposalClaimSchema.index({ claimedBy: 1, claimedAt: -1 });
+disposalClaimSchema.index(
+    { bin: 1, detectionId: 1 },
+    { unique: true, partialFilterExpression: { detectionId: { $type: 'string' } } }
+);
  
 const DisposalClaim = mongoose.model('DisposalClaim', disposalClaimSchema);
  

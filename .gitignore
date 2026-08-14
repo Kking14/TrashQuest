@@ -1,2 +1,7 @@
 node_modules
 .env
+.env.station
+.trashquest-processes.json
+__pycache__/
+*.pyc
+Frontend/dist/
