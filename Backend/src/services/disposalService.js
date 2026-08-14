@@ -75,12 +75,26 @@ const getDisposalSessionTokens = async (sessionCode, userID) => {
 // registers the physical event regardless of whether anyone scans the QR.
 // Bin fullness is reported separately by the ultrasonic sensor. This returns a
 // short-lived claim token for the bin to display as a QR code.
-const createDisposalClaim = async (bin, wasteType, quantity, itemCount = 1) => {
+const createDisposalClaim = async (bin, wasteType, quantity, itemCount = 1, detectionId = null) => {
     if (bin.status === 'inactive') {
         throw new Error('This bin is currently inactive');
     }
     if (!bin.acceptedWasteTypes.includes(wasteType)) {
         throw new Error(`This bin does not accept ${wasteType}`);
+    }
+    const normalizedDetectionId = typeof detectionId === 'string' ? detectionId.trim() : '';
+    if (normalizedDetectionId) {
+        const existingClaim = await DisposalClaim.findOne({
+            bin: bin._id,
+            detectionId: normalizedDetectionId,
+        });
+        if (existingClaim) {
+            return {
+                claim: existingClaim,
+                pointsAvailable: calculatePoints(existingClaim.wasteType, existingClaim.quantity),
+                duplicate: true,
+            };
+        }
     }
  
     // Calculated now, at detection time, so the claim is a fixed offer that
@@ -95,6 +109,7 @@ const createDisposalClaim = async (bin, wasteType, quantity, itemCount = 1) => {
         wasteType,
         quantity,
         itemCount: Math.max(1, Math.floor(Number(itemCount) || 1)),
+        detectionId: normalizedDetectionId || null,
         claimToken,
         expiresAt,
     });
@@ -102,7 +117,7 @@ const createDisposalClaim = async (bin, wasteType, quantity, itemCount = 1) => {
     bin.lastDisposalAt = new Date();
     await bin.save();
  
-    return { claim, pointsAvailable };
+    return { claim, pointsAvailable, duplicate: false };
 };
  
 // Step 2: called when a resident scans the QR and the app submits the token

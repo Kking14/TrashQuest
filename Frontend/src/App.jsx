@@ -438,7 +438,11 @@ function BinDisplayDashboard({ onExit }) {
   const [displayState, setDisplayState] = useState('ready');
   const [detectedItem, setDetectedItem] = useState(null);
   const [detectionConfirmed, setDetectionConfirmed] = useState(false);
+  const [gatewayOnline, setGatewayOnline] = useState(false);
+  const [cameraStatus, setCameraStatus] = useState({ fps: null, detections: [], paperProgress: 0 });
+  const [cameraVisible, setCameraVisible] = useState(true);
   const detectionTimer = useRef(null);
+  const gatewaySequence = useRef(0);
 
   const totalGrams = items.reduce((sum, item) => sum + item.grams, 0);
   const groupedItems = binWasteOptions.map((option) => ({
@@ -455,26 +459,130 @@ function BinDisplayDashboard({ onExit }) {
 
   useEffect(() => () => clearTimeout(detectionTimer.current), []);
 
+  useEffect(() => {
+    let stopped = false;
+    async function pollGateway() {
+      try {
+        const health = await fetch('http://127.0.0.1:8765/health', { cache: 'no-store' });
+        const status = await health.json();
+        if (!stopped) {
+          setGatewayOnline(Boolean(status.online && status.serial && status.camera));
+          setCameraStatus({
+            fps: status.visionFps ?? null,
+            detections: status.detections || [],
+            paperProgress: status.paperHoldProgress || 0,
+          });
+        }
+        const response = await fetch(
+          `http://127.0.0.1:8765/events?after=${gatewaySequence.current}`,
+          { cache: 'no-store' }
+        );
+        const payload = await response.json();
+        for (const event of payload.events || []) {
+          gatewaySequence.current = Math.max(gatewaySequence.current, event.sequence || 0);
+          if (event.type === 'item_detected') {
+            handleWasteDetected(event.wasteType, event.grams, event);
+          } else if (event.type === 'item_sorted') {
+            handleWasteSorted(event);
+          } else if (event.type === 'error') {
+            setNotice(event.message || 'The station could not record this item.');
+          } else if (event.type === 'rejected') {
+            setNotice('Item not recognized. Please remove it and try again.');
+          }
+        }
+      } catch {
+        if (!stopped) setGatewayOnline(false);
+      }
+    }
+    pollGateway();
+    const timer = setInterval(pollGateway, 750);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [displayState]);
+
   // Temporary test controls call this now. Later, the hardware bridge can call
   // this same function with the YOLO/sensor result and measured weight.
-  function handleWasteDetected(wasteType, detectedGrams) {
+  function handleWasteDetected(wasteType, detectedGrams, hardwareData = null) {
     if (displayState !== 'ready') return;
     const option = binWasteOptions.find((entry) => entry.value === wasteType);
     const normalizedGrams = Math.max(1, Math.round(Number(detectedGrams) || 100));
-    const detectedId = crypto.randomUUID();
+    const detectedId = hardwareData?.detectionId || crypto.randomUUID();
     setClaim(null);
     setNotice('');
     setDetectionConfirmed(false);
-    setDetectedItem({ ...option, id: detectedId, grams: normalizedGrams });
+    setDetectedItem({ ...option, id: detectedId, grams: normalizedGrams, hardwareData });
     setDisplayState('detecting');
     clearTimeout(detectionTimer.current);
     detectionTimer.current = setTimeout(() => {
-      setItems((currentItems) => [
-        ...currentItems,
-        { id: detectedId, wasteType, grams: normalizedGrams },
-      ]);
+      if (!hardwareData) {
+        setItems((currentItems) => [
+          ...currentItems,
+          { id: detectedId, wasteType, grams: normalizedGrams },
+        ]);
+      }
       setDisplayState('recognized');
     }, 900);
+  }
+
+  function handleWasteSorted(event) {
+    const option = binWasteOptions.find((entry) => entry.value === event.wasteType);
+    setItems((currentItems) => currentItems.some((item) => item.id === event.detectionId)
+      ? currentItems
+      : [...currentItems, {
+          id: event.detectionId,
+          wasteType: event.wasteType,
+          grams: event.grams,
+          claimToken: event.claimToken,
+          pointsAvailable: event.pointsAvailable,
+          expiresAt: event.expiresAt,
+        }]);
+    setDetectedItem((current) => ({
+      ...option,
+      ...current,
+      id: event.detectionId,
+      grams: event.grams,
+      hardwareData: event,
+    }));
+    setDetectionConfirmed(true);
+    setBusy(false);
+    setNotice('Identification confirmed and item sorted successfully.');
+    setDisplayState('recognized');
+  }
+
+  async function submitHardwareConfirmation(accepted) {
+    const detectionId = detectedItem?.hardwareData?.detectionId;
+    if (!detectionId) {
+      if (accepted) setDetectionConfirmed(true);
+      return;
+    }
+    const response = await fetch('http://127.0.0.1:8765/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ detectionId, accepted }),
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.message || 'Could not send confirmation to the station.');
+    }
+  }
+
+  async function confirmDetection() {
+    try {
+      setBusy(true);
+      setNotice('Confirmed. Sorting the item now…');
+      await submitHardwareConfirmation(true);
+      if (!detectedItem?.hardwareData) {
+        setDetectionConfirmed(true);
+        setBusy(false);
+      } else {
+        setDisplayState('detecting');
+      }
+    } catch (error) {
+      setBusy(false);
+      setNotice(error.message);
+    }
   }
 
   function waitForNextItem() {
@@ -484,12 +592,17 @@ function BinDisplayDashboard({ onExit }) {
     setNotice('');
   }
 
-  function rejectDetection() {
-    setItems((currentItems) => currentItems.filter((item) => item.id !== detectedItem?.id));
-    setDetectedItem(null);
-    setDetectionConfirmed(false);
-    setDisplayState('ready');
-    setNotice('Incorrect detection removed. Please place the item in the station again.');
+  async function rejectDetection() {
+    try {
+      await submitHardwareConfirmation(false);
+      setItems((currentItems) => currentItems.filter((item) => item.id !== detectedItem?.id));
+      setDetectedItem(null);
+      setDetectionConfirmed(false);
+      setDisplayState('ready');
+      setNotice('Incorrect detection rejected. The motors did not move. Remove the item and try again.');
+    } catch (error) {
+      setNotice(error.message);
+    }
   }
 
   function unlock(event) {
@@ -574,31 +687,35 @@ function BinDisplayDashboard({ onExit }) {
     setNotice('');
     try {
       const claims = [];
-      for (const group of groupedItems) {
+      for (const item of items) {
+        const itemOption = binWasteOptions.find((entry) => entry.value === item.wasteType);
         let claimData;
-        if (activeDeviceKey) {
+        if (item.claimToken) {
+          claimData = item;
+        } else if (activeDeviceKey) {
           const response = await apiRequest('/api/disposals/claims', {
             method: 'POST',
             headers: { 'x-device-key': activeDeviceKey },
             body: {
-              wasteType: group.value,
-              quantity: group.grams / 1000,
-              itemCount: group.count,
+              wasteType: item.wasteType,
+              quantity: item.grams / 1000,
+              itemCount: 1,
+              detectionId: item.id,
             },
           });
           claimData = response.data;
         } else {
           claimData = {
-            claimToken: `trashquest-test:${group.value}:${group.grams}:${Date.now()}`,
-            pointsAvailable: estimatePoints(group.value, group.grams),
+            claimToken: `trashquest-test:${item.wasteType}:${item.grams}:${item.id}`,
+            pointsAvailable: estimatePoints(item.wasteType, item.grams),
             expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
           };
         }
         claims.push({
-          wasteType: group.value,
-          label: group.label,
-          icon: group.icon,
-          grams: group.grams,
+          wasteType: item.wasteType,
+          label: itemOption?.label || item.wasteType,
+          icon: itemOption?.icon || '♻',
+          grams: item.grams,
           pointsAvailable: claimData.pointsAvailable,
           claimToken: claimData.claimToken,
           expiresAt: claimData.expiresAt,
@@ -689,9 +806,45 @@ function BinDisplayDashboard({ onExit }) {
     <main className={`bin-display-shell kiosk-state-${displayState}`}>
       <header className="kiosk-header">
         <div className="kiosk-brand"><span>TQ</span><strong>TrashQuest</strong></div>
-        <div className="station-status"><i /> Station online</div>
+        <div className="station-status"><i /> {gatewayOnline ? 'Hardware connected' : 'Test mode'}</div>
         <button type="button" className="kiosk-exit" onClick={onExit}>Exit display</button>
       </header>
+
+      <aside className={`ai-camera-panel ${cameraVisible ? 'is-open' : 'is-closed'}`}>
+        <div className="ai-camera-heading">
+          <div>
+            <span><i /> AI camera</span>
+            <small>{gatewayOnline ? `${cameraStatus.fps ?? '—'} FPS` : 'Gateway offline'}</small>
+          </div>
+          <button type="button" onClick={() => setCameraVisible((visible) => !visible)}>
+            {cameraVisible ? 'Hide' : 'Show camera'}
+          </button>
+        </div>
+        {cameraVisible && (
+          <div className="ai-camera-feed">
+            {gatewayOnline ? (
+              <img src="http://127.0.0.1:8765/camera.mjpg" alt="Live TrashQuest AI camera with detection boxes" />
+            ) : (
+              <div className="ai-camera-empty">Start the station gateway to view the camera.</div>
+            )}
+            <div className="ai-camera-detections">
+              {cameraStatus.detections.length > 0
+                ? cameraStatus.detections.slice(0, 3).map((detection, index) => (
+                    <span key={`${detection.className}-${index}`}>
+                      {detection.className} {Math.round(detection.confidence * 100)}%
+                    </span>
+                  ))
+                : <span>No AI object detected</span>}
+            </div>
+            {cameraStatus.paperProgress > 0 && cameraStatus.paperProgress < 1 && (
+              <div className="ai-paper-hold">
+                <strong>Hold paper steady</strong>
+                <span><i style={{ width: `${cameraStatus.paperProgress * 100}%` }} /></span>
+              </div>
+            )}
+          </div>
+        )}
+      </aside>
 
       <section className="kiosk-stage">
         {displayState === 'ready' && (
@@ -730,8 +883,8 @@ function BinDisplayDashboard({ onExit }) {
               <div className="classification-review">
                 <strong>Is this identification correct?</strong>
                 <div>
-                  <button type="button" className="review-wrong" onClick={rejectDetection}><span>✕</span> No, incorrect</button>
-                  <button type="button" className="review-correct" onClick={() => setDetectionConfirmed(true)}><span>✓</span> Yes, correct</button>
+                  <button type="button" className="review-wrong" onClick={rejectDetection} disabled={busy}><span>✕</span> No, incorrect</button>
+                  <button type="button" className="review-correct" onClick={confirmDetection} disabled={busy}><span>✓</span> Yes, correct</button>
                 </div>
               </div>
             ) : (
