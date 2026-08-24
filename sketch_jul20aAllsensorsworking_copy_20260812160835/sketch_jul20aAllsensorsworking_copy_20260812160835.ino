@@ -18,13 +18,13 @@ const float minDetectDistance = 2.0;
 const float maxDetectDistance = 12.7;
 const int consecutiveConfirms = 3;
 
-const int stepsPerRoute = 200;
-const int paperStepsPerRoute = 100; // 90 degrees when stepsPerRoute is 180 degrees
-const int stepDelayUs = 1000;
-const int servoFreq = 50;
-const int servoResolution = 16;
-const int servoMinUs = 500;
-const int servoMaxUs = 2400;
+const int moveSteps = 200;
+const int stepDelayUs = 3000;
+const int servoSpeedMs = 3;
+const int servoNormalAngle = -20;
+const int servoDownAngle = 90;
+const bool metalDirection = HIGH;
+const bool plasticDirection = LOW;
 // Allow time for the resident to review the website classification before the
 // gateway sends sort/reject. No motor moves while the controller is waiting.
 const unsigned long commandTimeoutMs = 120000;
@@ -45,8 +45,11 @@ int availableConfirmCount = 0;
 bool reportedFull = false;
 bool hasFullnessReport = false;
 
-void moveServoTo(int targetAngle);
 void stepMotor(int steps, bool direction);
+void moveServoSlowly(int startAngle, int endAngle);
+void holdServo(int angle, int cycles);
+void runSortingMovement(bool outwardDirection);
+void runPaperMovement();
 float getMedianDistance();
 void updateFullness();
 
@@ -79,40 +82,47 @@ void setup() {
   pinMode(inductivePin, INPUT_PULLUP);
   pinMode(dirPin, OUTPUT);
   pinMode(pulPin, OUTPUT);
+  pinMode(servoPin, OUTPUT);
   pinMode(trigPin, OUTPUT);
   pinMode(echoPin, INPUT);
-  digitalWrite(trigPin, LOW);
   digitalWrite(dirPin, LOW);
   digitalWrite(pulPin, LOW);
-  ledcAttach(servoPin, servoFreq, servoResolution);
-  moveServoTo(0);
+  digitalWrite(servoPin, LOW);
+  digitalWrite(trigPin, LOW);
+  holdServo(servoNormalAngle, 25);
   sendEvent("ready", "");
 }
 
 void performSort(const String &wasteType) {
-  // Each material receives a motor route before the servo opens the gate.
-  bool moved = false;
-  bool outwardDirection = true;
-  int routeSteps = stepsPerRoute;
   if (wasteType == "Tin Can") {
-    moved = true;
-    outwardDirection = true;
+    runSortingMovement(metalDirection);
   } else if (wasteType == "Plastic") {
-    moved = true;
-    outwardDirection = false;
+    runSortingMovement(plasticDirection);
   } else if (wasteType == "Paper") {
-    moved = true;
-    outwardDirection = true;
-    routeSteps = paperStepsPerRoute;
+    runPaperMovement();
   }
+}
 
-  if (moved) stepMotor(routeSteps, outwardDirection);
-  delay(500);
-  moveServoTo(180);
-  delay(1800);
-  moveServoTo(0);
-  delay(500);
-  if (moved) stepMotor(routeSteps, !outwardDirection);
+void runSortingMovement(bool outwardDirection) {
+  // Metal and plastic move to opposite sides before the servo gate opens.
+  stepMotor(moveSteps, outwardDirection);
+  delay(1000);
+
+  moveServoSlowly(servoNormalAngle, servoDownAngle);
+  delay(2000);
+
+  moveServoSlowly(servoDownAngle, servoNormalAngle);
+  delay(1000);
+
+  stepMotor(moveSteps, !outwardDirection);
+}
+
+void runPaperMovement() {
+  // Paper uses the home route, so only the servo gate moves.
+  moveServoSlowly(servoNormalAngle, servoDownAngle);
+  delay(2000);
+
+  moveServoSlowly(servoDownAngle, servoNormalAngle);
 }
 
 void handleCommand() {
@@ -186,6 +196,8 @@ void loop() {
     return;
   }
 
+  // Either physical sensor can begin a detection. The gateway fuses the
+  // inductive result, Sharp presence, and AI camera classification.
   if (objectPresent || metal) confirmCount++; else confirmCount = 0;
   if (confirmCount >= consecutiveConfirms) {
     confirmCount = 0;
@@ -240,21 +252,43 @@ void updateFullness() {
 }
 
 void stepMotor(int steps, bool direction) {
-  digitalWrite(dirPin, direction ? HIGH : LOW);
-  delayMicroseconds(50);
+  digitalWrite(pulPin, LOW);
+  digitalWrite(dirPin, direction);
+  delay(100);
+
   for (int i = 0; i < steps; i++) {
     digitalWrite(pulPin, HIGH);
     delayMicroseconds(stepDelayUs);
     digitalWrite(pulPin, LOW);
     delayMicroseconds(stepDelayUs);
   }
+
+  digitalWrite(pulPin, LOW);
 }
 
-void moveServoTo(int targetAngle) {
-  targetAngle = constrain(targetAngle, 0, 180);
-  int pulseWidthUs = map(targetAngle, 0, 180, servoMinUs, servoMaxUs);
-  int duty = (int)((pulseWidthUs / 20000.0) * ((1 << servoResolution) - 1));
-  ledcWrite(servoPin, duty);
+void moveServoSlowly(int startAngle, int endAngle) {
+  int movementDirection = endAngle > startAngle ? 1 : -1;
+
+  for (int angle = startAngle;
+       angle != endAngle + movementDirection;
+       angle += movementDirection) {
+    holdServo(angle, 1);
+    delay(servoSpeedMs);
+  }
+
+  holdServo(endAngle, 15);
+}
+
+void holdServo(int angle, int cycles) {
+  angle = constrain(angle, -20, 180);
+  int pulseWidthUs = map(angle, -20, 180, 400, 2400);
+
+  for (int cycle = 0; cycle < cycles; cycle++) {
+    digitalWrite(servoPin, HIGH);
+    delayMicroseconds(pulseWidthUs);
+    digitalWrite(servoPin, LOW);
+    delayMicroseconds(20000 - pulseWidthUs);
+  }
 }
 
 float getMedianDistance() {
