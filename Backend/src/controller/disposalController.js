@@ -1,12 +1,18 @@
 import { createDisposalClaim, createDisposalSession, getDisposalSessionTokens, claimDisposal, getUserDisposals, getAllDisposals } from '../services/disposalService.js';
+import { POINTS_PER_ITEM } from '../services/pointsService.js';
+
+const getPointRates = async (req, res) => {
+    res.status(200).json({ success: true, data: POINTS_PER_ITEM });
+};
  
 // Called by the bin device (authenticated via device key) right after its
 // sensor detects a disposal. req.bin comes from authenticateDevice middleware.
 const registerDisposalClaim = async (req, res) => {
     try {
-        const { wasteType, quantity, itemCount, detectionId } = req.body;
+        const { wasteType, quantity, estimatedGrams, itemCount, detectionId, confidence, source } = req.body;
         const { claim, pointsAvailable, duplicate } = await createDisposalClaim(
-            req.bin, wasteType, quantity, itemCount, detectionId
+            req.bin, wasteType, itemCount, detectionId,
+            { quantity, estimatedGrams, confidence, source }
         );
         res.status(duplicate ? 200 : 201).json({
             success: true,
@@ -15,6 +21,7 @@ const registerDisposalClaim = async (req, res) => {
                 claimToken: claim.claimToken, // this is what the bin encodes as its QR code
                 expiresAt: claim.expiresAt,
                 pointsAvailable,
+                itemCount: claim.itemCount,
                 duplicate,
             },
         });
@@ -29,7 +36,7 @@ const registerDisposalSession = async (req, res) => {
         res.status(201).json({
             success: true,
             message: 'Disposal session created',
-            data: { sessionCode: session.code, expiresAt: session.expiresAt },
+            data: { sessionCode: session.code, itemCount: session.itemCount, expiresAt: session.expiresAt },
         });
     } catch (error) {
         res.status(400).json({ success: false, message: error.message });
@@ -102,4 +109,4 @@ const getDisposalLogs = async (req, res) => {
     }
 };
  
-export { registerDisposalClaim, registerDisposalSession, claimDisposalPoints, getMyDisposals, getDisposalLogs };
+export { getPointRates, registerDisposalClaim, registerDisposalSession, claimDisposalPoints, getMyDisposals, getDisposalLogs };

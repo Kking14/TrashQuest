@@ -77,7 +77,7 @@ const joinQuest = async (questID, userID) => {
 
 // Called right after a disposal claim is completed. Matching active quests
 // automatically track the resident; no manual join is required.
-const updateQuestProgress = async (userID, wasteType, quantityKg = 0, itemCount = 1) => {
+const updateQuestProgress = async (userID, wasteType, itemCount = 1) => {
     const now = new Date();
     const completedQuests = [];
     const progressUpdates = [];
@@ -102,15 +102,8 @@ const updateQuestProgress = async (userID, wasteType, quantityKg = 0, itemCount 
         if (participant.completed) continue;
 
         participant.progress += Math.max(1, Math.floor(Number(itemCount) || 1));
-        const disposalGrams = Number(quantityKg || 0) * 1000;
-        const existingGrams = participant.weightProgressGrams
-            || Number(participant.weightProgressKg || 0) * 1000;
-        participant.weightProgressGrams = existingGrams + disposalGrams;
-
         const countTargetMet = !quest.targetCount || participant.progress >= quest.targetCount;
-        const targetGrams = quest.targetWeightGrams || Number(quest.targetWeightKg || 0) * 1000;
-        const weightTargetMet = !targetGrams || participant.weightProgressGrams >= targetGrams;
-        if (countTargetMet && weightTargetMet) {
+        if (countTargetMet) {
             participant.completed = true;
             participant.completedAt = new Date();
             await User.findByIdAndUpdate(userID, { $inc: { points: quest.pointsReward } });
@@ -128,8 +121,6 @@ const updateQuestProgress = async (userID, wasteType, quantityKg = 0, itemCount 
             wasteType: quest.wasteType,
             progress: participant.progress,
             targetCount: quest.targetCount,
-            weightProgressGrams: participant.weightProgressGrams,
-            targetWeightGrams: targetGrams,
             completed: participant.completed,
         });
     }
@@ -146,7 +137,7 @@ const closeQuest = async (questID) => {
 
 const updateQuest = async (questID, questData) => {
     const allowedFields = [
-        'title', 'description', 'wasteType', 'targetCount', 'targetWeightGrams',
+        'title', 'description', 'wasteType', 'targetCount',
         'pointsReward', 'frequency', 'startDate', 'expiryDate', 'status',
     ];
     const updates = Object.fromEntries(
@@ -154,9 +145,6 @@ const updateQuest = async (questID, questData) => {
             .filter((field) => Object.prototype.hasOwnProperty.call(questData, field))
             .map((field) => [field, questData[field]])
     );
-    if (Object.prototype.hasOwnProperty.call(updates, 'targetWeightGrams')) {
-        updates.targetWeightKg = null;
-    }
     const quest = await Quest.findById(questID);
     if (!quest) throw new Error('Quest not found');
     quest.set(updates);

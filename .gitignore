@@ -1,7 +1,17 @@
 node_modules
+.venv/
+.venv.broken-*/
+.runtime/
+.yolo-config/
+.arduino-build/
+.vite/
 .env
 .env.station
 .trashquest-processes.json
 __pycache__/
 *.pyc
 Frontend/dist/
+paper detection/*.pt
+paper detection/**/*.pt
+paper detection/detection_*.txt
+paper detection/*.jpg

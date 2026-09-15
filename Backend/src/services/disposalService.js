@@ -43,6 +43,7 @@ const createDisposalSession = async (bin, claimTokens) => {
                 bin: bin._id,
                 code: generateSessionCode(),
                 claimTokens: uniqueTokens,
+                itemCount: claims.reduce((sum, claim) => sum + (claim.itemCount || 1), 0),
                 expiresAt: new Date(Math.min(...claims.map((claim) => claim.expiresAt.getTime()))),
             });
         } catch (error) {
@@ -70,19 +71,27 @@ const getDisposalSessionTokens = async (sessionCode, userID) => {
     return session;
 };
  
-// Step 1: called by the bin device itself right after its sensor detects a
-// disposal (wasteType/quantity come from the sensor, not a resident). This
-// registers the physical event regardless of whether anyone scans the QR.
+// Step 1: called by the station only after the ESP32 acknowledges a successful
+// batch sort. Item count comes from stable AI boxes, not resident input.
 // Bin fullness is reported separately by the ultrasonic sensor. This returns a
 // short-lived claim token for the bin to display as a QR code.
-const createDisposalClaim = async (bin, wasteType, quantity, itemCount = 1, detectionId = null) => {
+const createDisposalClaim = async (
+    bin, wasteType, itemCount = 1, detectionId = null, metadata = {}
+) => {
     if (bin.status === 'inactive') {
         throw new Error('This bin is currently inactive');
+    }
+    if (bin.isFull || bin.status === 'needs_collection') {
+        throw new Error('This bin is full and needs collection');
     }
     if (!bin.acceptedWasteTypes.includes(wasteType)) {
         throw new Error(`This bin does not accept ${wasteType}`);
     }
     const normalizedDetectionId = typeof detectionId === 'string' ? detectionId.trim() : '';
+    const normalizedItemCount = Number(itemCount);
+    if (!Number.isInteger(normalizedItemCount) || normalizedItemCount < 1 || normalizedItemCount > 100) {
+        throw new Error('itemCount must be an integer between 1 and 100');
+    }
     if (normalizedDetectionId) {
         const existingClaim = await DisposalClaim.findOne({
             bin: bin._id,
@@ -91,7 +100,7 @@ const createDisposalClaim = async (bin, wasteType, quantity, itemCount = 1, dete
         if (existingClaim) {
             return {
                 claim: existingClaim,
-                pointsAvailable: calculatePoints(existingClaim.wasteType, existingClaim.quantity),
+                pointsAvailable: calculatePoints(existingClaim.wasteType, existingClaim.itemCount || 1),
                 duplicate: true,
             };
         }
@@ -99,20 +108,36 @@ const createDisposalClaim = async (bin, wasteType, quantity, itemCount = 1, dete
  
     // Calculated now, at detection time, so the claim is a fixed offer that
     // can't be changed by delaying the scan.
-    const pointsAvailable = calculatePoints(wasteType, quantity);
+    const pointsAvailable = calculatePoints(wasteType, normalizedItemCount);
  
     const claimToken = crypto.randomBytes(16).toString('hex');
     const expiresAt = new Date(Date.now() + CLAIM_EXPIRY_MINUTES * 60 * 1000);
  
-    const claim = await DisposalClaim.create({
-        bin: bin._id,
-        wasteType,
-        quantity,
-        itemCount: Math.max(1, Math.floor(Number(itemCount) || 1)),
-        detectionId: normalizedDetectionId || null,
-        claimToken,
-        expiresAt,
-    });
+    let claim;
+    try {
+        claim = await DisposalClaim.create({
+            bin: bin._id,
+            wasteType,
+            quantity: Math.max(0, Number(metadata.quantity) || 0),
+            estimatedGrams: metadata.estimatedGrams == null
+                ? null : Math.max(0, Number(metadata.estimatedGrams) || 0),
+            itemCount: normalizedItemCount,
+            detectionId: normalizedDetectionId || null,
+            confidence: metadata.confidence == null ? null : Number(metadata.confidence),
+            source: metadata.source || null,
+            claimToken,
+            expiresAt,
+        });
+    } catch (error) {
+        if (error.code !== 11000 || !normalizedDetectionId) throw error;
+        claim = await DisposalClaim.findOne({ bin: bin._id, detectionId: normalizedDetectionId });
+        if (!claim) throw error;
+        return {
+            claim,
+            pointsAvailable: calculatePoints(claim.wasteType, claim.itemCount || 1),
+            duplicate: true,
+        };
+    }
  
     bin.lastDisposalAt = new Date();
     await bin.save();
@@ -142,7 +167,7 @@ const claimDisposal = async (claimToken, userID, disposalSession = null) => {
         throw new Error('Bin associated with this claim no longer exists');
     }
  
-    const pointsAwarded = calculatePoints(claim.wasteType, claim.quantity);
+    const pointsAwarded = calculatePoints(claim.wasteType, claim.itemCount || 1);
  
     const disposal = await Disposal.create({
         user: userID,
@@ -152,7 +177,11 @@ const claimDisposal = async (claimToken, userID, disposalSession = null) => {
         zone: bin.zone || 'default',
         wasteType: claim.wasteType,
         quantity: claim.quantity,
+        estimatedGrams: claim.estimatedGrams,
         itemCount: claim.itemCount || 1,
+        detectionId: claim.detectionId,
+        confidence: claim.confidence,
+        source: claim.source,
         pointsAwarded,
     });
  
@@ -167,7 +196,6 @@ const claimDisposal = async (claimToken, userID, disposalSession = null) => {
         const questResult = await updateQuestProgress(
             userID,
             claim.wasteType,
-            claim.quantity,
             claim.itemCount || 1
         );
         completedQuests = questResult.completedQuests;
@@ -197,6 +225,7 @@ const getUserDisposals = async (userID) => {
                 isSession: Boolean(disposal.session),
                 bin: disposal.bin,
                 quantity: 0,
+                itemCount: 0,
                 pointsAwarded: 0,
                 createdAt: disposal.createdAt,
                 items: [],
@@ -204,11 +233,14 @@ const getUserDisposals = async (userID) => {
         }
         const entry = grouped.get(groupKey);
         entry.quantity += Number(disposal.quantity || 0);
+        entry.itemCount += Number(disposal.itemCount || 1);
         entry.pointsAwarded += Number(disposal.pointsAwarded || 0);
         entry.items.push({
             _id: disposal._id,
             wasteType: disposal.wasteType,
             quantity: disposal.quantity,
+            estimatedGrams: disposal.estimatedGrams,
+            itemCount: disposal.itemCount || 1,
             pointsAwarded: disposal.pointsAwarded,
         });
         if (new Date(disposal.createdAt) > new Date(entry.createdAt)) {

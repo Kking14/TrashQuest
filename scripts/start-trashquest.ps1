@@ -6,6 +6,7 @@ $frontendPath = Join-Path $projectRoot 'Frontend'
 $stationEnvPath = Join-Path $projectRoot '.env.station'
 $pidFile = Join-Path $projectRoot '.trashquest-processes.json'
 $gatewayPython = Join-Path $projectRoot '.venv\Scripts\python.exe'
+$runtimeConfigPath = Join-Path $projectRoot '.runtime'
 
 function Show-Step([string]$message) {
     Write-Host "[TrashQuest] $message" -ForegroundColor Cyan
@@ -56,6 +57,12 @@ try {
     Require-Path $gatewayPython 'The Python virtual environment is missing. Create .venv and install requirements-station.txt.'
     Require-Path (Join-Path $backendPath 'node_modules') 'Backend dependencies are missing. Run npm.cmd install in Backend.'
     Require-Path (Join-Path $frontendPath 'node_modules') 'Frontend dependencies are missing. Run npm.cmd install in Frontend.'
+
+    $matplotlibConfigPath = Join-Path $runtimeConfigPath 'matplotlib'
+    $yoloConfigPath = Join-Path $runtimeConfigPath 'ultralytics'
+    New-Item -ItemType Directory -Force -Path $matplotlibConfigPath, $yoloConfigPath | Out-Null
+    $env:MPLCONFIGDIR = $matplotlibConfigPath
+    $env:YOLO_CONFIG_DIR = $yoloConfigPath
 
     foreach ($port in @(5001, 5173, 8765)) {
         if (Test-Port $port) {

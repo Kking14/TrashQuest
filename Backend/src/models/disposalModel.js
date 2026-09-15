@@ -33,14 +33,19 @@ const disposalSchema = new mongoose.Schema({
     },
     quantity: {
         type: Number,
-        required: [true, 'Quantity (kg) is required'],
+        default: 0,
         min: 0,
     },
+    estimatedGrams: { type: Number, min: 0, default: null },
     itemCount: {
         type: Number,
         min: 1,
+        max: 100,
         default: 1,
     },
+    detectionId: { type: String, trim: true, maxlength: 100, default: null },
+    confidence: { type: Number, min: 0, max: 1, default: null },
+    source: { type: String, trim: true, maxlength: 40, default: null },
     pointsAwarded: {
         type: Number,
         required: true,

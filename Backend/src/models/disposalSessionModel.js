@@ -18,6 +18,11 @@ const disposalSessionSchema = new mongoose.Schema({
         required: true,
         validate: [(tokens) => tokens.length > 0, 'A session needs at least one claim'],
     },
+    itemCount: {
+        type: Number,
+        min: 1,
+        required: true,
+    },
     expiresAt: {
         type: Date,
         required: true,
