@@ -5,6 +5,7 @@ import {
     claimDisposalPoints,
     getMyDisposals,
     getDisposalLogs,
+    getPointRates,
 } from '../controller/disposalController.js';
 import authenticate from '../middleware/authenticate.js';
 import authorize from '../middleware/authorizeRoles.js';
@@ -13,6 +14,7 @@ import authenticateDevice from '../middleware/authenticateDevice.js';
 const router = express.Router();
  
 // Bin device -> backend (sensor just detected a disposal)
+router.get('/point-rates', authenticateDevice, getPointRates);
 router.post('/claims', authenticateDevice, registerDisposalClaim);
 router.post('/sessions', authenticateDevice, registerDisposalSession);
  

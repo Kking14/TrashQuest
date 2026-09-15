@@ -93,8 +93,8 @@ const questSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 questSchema.pre('validate', function validateQuestTarget(next) {
-    if (!this.targetCount && !this.targetWeightGrams && !this.targetWeightKg) {
-        return next(new Error('Set an item target, a weight target, or both'));
+    if (!this.targetCount) {
+        return next(new Error('Set an item-count target'));
     }
     return next();
 });

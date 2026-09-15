@@ -14,12 +14,14 @@ const disposalClaimSchema = new mongoose.Schema({
     },
     quantity: {
         type: Number,
-        required: [true, 'Quantity (kg) is required'],
+        default: 0,
         min: 0,
     },
+    estimatedGrams: { type: Number, min: 0, default: null },
     itemCount: {
         type: Number,
         min: 1,
+        max: 100,
         default: 1,
     },
     // Stable event ID supplied by the station gateway. Together with `bin`,
@@ -30,6 +32,8 @@ const disposalClaimSchema = new mongoose.Schema({
         maxlength: 100,
         default: null,
     },
+    confidence: { type: Number, min: 0, max: 1, default: null },
+    source: { type: String, trim: true, maxlength: 40, default: null },
     // What the bin's screen encodes as a QR code for the resident to scan
     claimToken: {
         type: String,

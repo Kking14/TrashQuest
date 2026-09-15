@@ -6,14 +6,14 @@ The web platform includes interfaces for residents, barangay administrators, and
 
 ## How it works
 
-1. A resident drops accepted waste into the TrashQuest station.
-2. The station identifies the material using its sensors and camera system.
-3. All accepted items are grouped into one disposal session.
-4. The bin display shows the detected waste and generates one QR code and claim code.
+1. A resident places one waste type on the platform (plastic bottles should be crushed first).
+2. YOLO filters individual boxes to the configured platform ROI and stabilizes their type and count.
+3. The resident confirms the detected batch and the ESP32 performs one sorting movement.
+4. Only a matching successful `sorted` acknowledgement creates a claim and its QR/session code.
 5. The resident scans the QR code or enters the code in the resident portal.
 6. Points and eligible daily or weekly quest progress are updated.
 
-The planned station hardware uses an inductive sensor for tin cans, an infrared sensor for plastic bottles, and a camera running a YOLOv8 model. This repository currently contains the TrashQuest web application and API; hardware firmware and model deployment can be integrated separately.
+The station uses a camera running the existing YOLO model for explicit waste classification and per-box counting, an inductive sensor for tin-can confirmation, and an ultrasonic sensor dedicated to bin fullness.
 
 ## Main interfaces
 
@@ -26,7 +26,7 @@ The planned station hardware uses an inductive sensor for tin cans, an infrared 
 - Separate first name, middle initial, and last name registration fields
 - Password confirmation, strength feedback, secure hashing, and JWT authentication
 - Session-based QR and manual-code claims
-- Plastic bottle, tin can, paper, and weight-based quest targets
+- AI-counted plastic bottle, tin can, and paper batches with item-count quest targets
 - Daily and weekly quests with scheduling and expiration handling
 - Completed and expired quest history
 - Ultrasonic-sensor full/available bin indicators
@@ -159,10 +159,29 @@ It creates each disposal claim using a stable detection ID, so retrying a failed
 HTTP response cannot create duplicate points. The kiosk uses those claim tokens
 to create the existing multi-item QR session.
 
-The current hardware has no load cell, so default weights are used for point
-estimates (paper 80 g, plastic 45 g, tin can 25 g). Add a calibrated load-cell
-reading as `grams` in the ESP32 `object_ready` message when that component is
-available.
+Plastic is explicitly recognized by a configured YOLO class. The Sharp sensor
+is no longer a classification authority. The GPIO 26 inductive sensor directly
+classifies a single Tin Can without requiring an AI detection, while the
+ultrasonic sensor is dedicated to fullness.
+After a Tin Can is sorted, GPIO 26 must remain inactive for 350 ms; the ESP32
+then reports the platform empty and enables the kiosk's next-batch button.
+Rewards and quest progress use stabilized AI bounding-box counts. Optional
+estimated grams are informational metadata only and never determine points.
+
+### Camera and reward configuration
+
+Copy `.env.station.example` to the untracked `.env.station` file. Calibrate
+`TQ_PLATFORM_ROI` as normalized `x1,y1,x2,y2` coordinates around only the
+physical platform, verify the model's exact class labels in
+`TQ_YOLO_CLASS_MAP`, and tune confidence/stability/rearm time for the installed
+camera. Hands, people, background boxes, low-confidence boxes, and boxes whose
+centres are outside the ROI are ignored. Stable batches containing more than
+one accepted waste type are rejected.
+
+Copy `Backend/.env.example` to the untracked `Backend/.env`. The
+`TQ_POINTS_PER_ITEM_*` defaults are configurable placeholders, not approved
+barangay values. Configure them only in `Backend/.env`; the authenticated
+gateway loads that authoritative rate table from the backend.
 
 ### Ultrasonic full-bin reporting
 
@@ -177,6 +196,37 @@ changes immediately and sends a heartbeat every 60 seconds. The gateway updates
 the authenticated bin through `/api/bins/sensor/full-status`; the admin dashboard
 polls every 10 seconds, marks the bin **Full / Needs collection**, and displays a
 notification when it changes from available to full.
+
+The controller uses bounded ultrasonic reads and a non-blocking state machine.
+A confirmed full bin rejects new reservations while continuing serial health
+and fullness reports.
+
+### Simulation and tests
+
+Run the complete gateway/kiosk transaction without a camera or ESP32:
+
+```bash
+python station_gateway.py --simulate
+```
+
+Open the bin display and use its enabled simulation controls. Simulation stays
+offline from the real claim API by default, even when a device key exists, and
+produces a clearly marked test QR that cannot award points. Only set
+`TQ_SIMULATION_USE_BACKEND=true` when intentionally testing against a disposable
+backend. Use **Finish & reset station** to simulate an empty platform and rearm
+the next batch.
+
+Run automated checks with:
+
+```bash
+python -m unittest discover -s tests
+cd Backend && npm test
+cd ../Frontend && npm run build
+```
+
+Software simulation does not verify motor direction, torque, sensor voltage
+levels, camera mounting, ROI calibration, or detection accuracy on physical
+waste.
 
 ### One-click Windows launcher
 

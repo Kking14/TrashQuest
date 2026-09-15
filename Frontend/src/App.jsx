@@ -11,21 +11,6 @@ const binWasteOptions = [
   { label: 'Paper', value: 'Paper', icon: '📄' },
 ];
 
-const POINTS_PER_KG = {
-  Paper: 5,
-  Plastic: 8,
-  'Tin Can': 8,
-};
-
-function getWasteLabel(value) {
-  return binWasteOptions.find((option) => option.value === value)?.label || value;
-}
-
-function estimatePoints(wasteType, grams) {
-  const rate = POINTS_PER_KG[wasteType] || 0;
-  return Math.round(rate * (grams / 1000));
-}
-
 function getPasswordStrength(password) {
   const checks = [
     password.length >= 8,
@@ -88,9 +73,9 @@ function App() {
 
   const totals = useMemo(() => {
     const disposalPoints = data.disposals.reduce((sum, disposal) => sum + (disposal.pointsAwarded || 0), 0);
-    const wasteGrams = data.disposals.reduce((sum, disposal) => sum + (disposal.quantity || 0) * 1000, 0);
+    const totalItems = data.disposals.reduce((sum, disposal) => sum + (disposal.itemCount || 0), 0);
     const collectionCount = data.bins.filter((bin) => bin.status === 'needs_collection').length;
-    return { disposalPoints, wasteGrams: Math.round(wasteGrams), collectionCount };
+    return { disposalPoints, totalItems, collectionCount };
   }, [data]);
 
   useEffect(() => {
@@ -228,9 +213,7 @@ function App() {
       (result?.data?.questProgressUpdates || [])
         .filter((quest) => !quest.completed)
         .forEach((quest) => {
-          const countText = quest.targetCount
-            ? `${quest.progress}/${quest.targetCount} item${quest.targetCount === 1 ? '' : 's'}`
-            : `${Math.round(quest.weightProgressGrams || 0)}/${quest.targetWeightGrams} g`;
+          const countText = `${quest.progress}/${quest.targetCount} item${quest.targetCount === 1 ? '' : 's'}`;
           showToast({
             title: 'Quest progress updated',
             message: `${quest.title}: ${countText}`,
@@ -475,8 +458,6 @@ function BinDisplayDashboard({ onExit }) {
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [password, setPassword] = useState('');
   const [deviceKey, setDeviceKey] = useState(() => localStorage.getItem('trashquest_bin_device_key') || '');
-  const [currentWaste, setCurrentWaste] = useState(binWasteOptions[0].value);
-  const [grams, setGrams] = useState('');
   const [items, setItems] = useState([]);
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
@@ -485,23 +466,22 @@ function BinDisplayDashboard({ onExit }) {
   const [detectedItem, setDetectedItem] = useState(null);
   const [detectionConfirmed, setDetectionConfirmed] = useState(false);
   const [gatewayOnline, setGatewayOnline] = useState(false);
-  const [cameraStatus, setCameraStatus] = useState({ fps: null, detections: [], paperProgress: 0 });
+  const [gatewaySimulation, setGatewaySimulation] = useState(false);
+  const [binFull, setBinFull] = useState(false);
+  const [platformCleared, setPlatformCleared] = useState(false);
+  const [cameraStatus, setCameraStatus] = useState({ fps: null, detections: [], workflowState: 'IDLE' });
   const [cameraVisible, setCameraVisible] = useState(true);
   const detectionTimer = useRef(null);
-  const gatewaySequence = useRef(0);
+  const gatewaySequence = useRef(null);
 
-  const totalGrams = items.reduce((sum, item) => sum + item.grams, 0);
+  const totalItems = items.reduce((sum, item) => sum + (item.itemCount || 1), 0);
   const groupedItems = binWasteOptions.map((option) => ({
     ...option,
-    count: items.filter((item) => item.wasteType === option.value).length,
-    grams: items
+    count: items
       .filter((item) => item.wasteType === option.value)
-      .reduce((sum, item) => sum + item.grams, 0),
-  })).filter((item) => item.grams > 0);
-  const estimatedTotalPoints = groupedItems.reduce(
-    (sum, item) => sum + estimatePoints(item.value, item.grams),
-    0
-  );
+      .reduce((sum, item) => sum + (item.itemCount || 1), 0),
+  })).filter((item) => item.count > 0);
+  const estimatedTotalPoints = items.reduce((sum, item) => sum + (item.pointsAvailable || 0), 0);
 
   useEffect(() => () => clearTimeout(detectionTimer.current), []);
 
@@ -513,27 +493,57 @@ function BinDisplayDashboard({ onExit }) {
         const status = await health.json();
         if (!stopped) {
           setGatewayOnline(Boolean(status.online && status.serial && status.camera));
+          setGatewaySimulation(Boolean(status.simulation));
+          setBinFull(Boolean(status.binFull));
+          if (
+            status.platformClear
+            && detectedItem?.hardwareData?.source !== 'inductive_sensor'
+            && ['qr', 'waiting-empty'].includes(displayState)
+          ) {
+            setPlatformCleared(true);
+          }
           setCameraStatus({
             fps: status.visionFps ?? null,
             detections: status.detections || [],
-            paperProgress: status.paperHoldProgress || 0,
+            workflowState: status.workflowState || 'IDLE',
           });
+          if (status.scanning && displayState === 'ready') setDisplayState('detecting');
+          if (!status.scanning && displayState === 'detecting' && !detectedItem) setDisplayState('ready');
         }
         const response = await fetch(
-          `http://127.0.0.1:8765/events?after=${gatewaySequence.current}`,
+          `http://127.0.0.1:8765/events?after=${gatewaySequence.current ?? 0}`,
           { cache: 'no-store' }
         );
         const payload = await response.json();
+        if (gatewaySequence.current === null) {
+          gatewaySequence.current = payload.latestSequence
+            ?? Math.max(0, ...(payload.events || []).map((event) => event.sequence || 0));
+          return;
+        }
         for (const event of payload.events || []) {
           gatewaySequence.current = Math.max(gatewaySequence.current, event.sequence || 0);
           if (event.type === 'item_detected') {
-            handleWasteDetected(event.wasteType, event.grams, event);
+            handleWasteDetected(event.wasteType, event.itemCount, event);
           } else if (event.type === 'item_sorted') {
             handleWasteSorted(event);
+          } else if (event.type === 'sorting_successful') {
+            setDisplayState('sorted');
+            setNotice('Sorting successful. Creating your claim…');
+          } else if (event.type === 'platform_empty') {
+            setPlatformCleared(true);
+            setNotice('Platform is empty and ready for the next batch.');
+            if (displayState === 'waiting-empty') {
+              setDetectedItem(null);
+              setDisplayState('ready');
+            }
+          } else if (event.type === 'mixed_waste_rejected') {
+            setDisplayState('ready');
+            setNotice(event.message);
           } else if (event.type === 'error') {
             setNotice(event.message || 'The station could not record this item.');
+            if (event.detectionId) setDisplayState('waiting-empty');
           } else if (event.type === 'rejected') {
-            setNotice('Item not recognized. Please remove it and try again.');
+            setNotice(event.message || 'Item not recognized. Please remove it and try again.');
           }
         }
       } catch {
@@ -548,24 +558,27 @@ function BinDisplayDashboard({ onExit }) {
     };
   }, [displayState]);
 
-  // Temporary test controls call this now. Later, the hardware bridge can call
-  // this same function with the YOLO/sensor result and measured weight.
-  function handleWasteDetected(wasteType, detectedGrams, hardwareData = null) {
-    if (displayState !== 'ready') return;
+  function handleWasteDetected(wasteType, detectedCount, hardwareData = null) {
+    if (!['ready', 'detecting'].includes(displayState)) return;
     const option = binWasteOptions.find((entry) => entry.value === wasteType);
-    const normalizedGrams = Math.max(1, Math.round(Number(detectedGrams) || 100));
+    const itemCount = Math.max(1, Math.round(Number(detectedCount) || 1));
     const detectedId = hardwareData?.detectionId || crypto.randomUUID();
     setClaim(null);
+    setPlatformCleared(false);
     setNotice('');
     setDetectionConfirmed(false);
-    setDetectedItem({ ...option, id: detectedId, grams: normalizedGrams, hardwareData });
+    setDetectedItem({
+      ...option, id: detectedId, itemCount,
+      pointsAvailable: hardwareData?.pointsAvailable ?? 0,
+      hardwareData,
+    });
     setDisplayState('detecting');
     clearTimeout(detectionTimer.current);
     detectionTimer.current = setTimeout(() => {
       if (!hardwareData) {
         setItems((currentItems) => [
           ...currentItems,
-          { id: detectedId, wasteType, grams: normalizedGrams },
+          { id: detectedId, wasteType, itemCount },
         ]);
       }
       setDisplayState('recognized');
@@ -574,27 +587,31 @@ function BinDisplayDashboard({ onExit }) {
 
   function handleWasteSorted(event) {
     const option = binWasteOptions.find((entry) => entry.value === event.wasteType);
-    setItems((currentItems) => currentItems.some((item) => item.id === event.detectionId)
-      ? currentItems
-      : [...currentItems, {
+    const sortedItem = {
           id: event.detectionId,
           wasteType: event.wasteType,
-          grams: event.grams,
+          itemCount: event.itemCount || 1,
+          confidence: event.confidence,
           claimToken: event.claimToken,
           pointsAvailable: event.pointsAvailable,
           expiresAt: event.expiresAt,
-        }]);
+        };
+    setItems((currentItems) => currentItems.some((item) => item.id === event.detectionId)
+      ? currentItems
+      : [...currentItems, sortedItem]);
     setDetectedItem((current) => ({
       ...option,
       ...current,
       id: event.detectionId,
-      grams: event.grams,
+      itemCount: event.itemCount,
+      confidence: event.confidence,
       hardwareData: event,
     }));
     setDetectionConfirmed(true);
     setBusy(false);
-    setNotice('Identification confirmed and item sorted successfully.');
-    setDisplayState('recognized');
+    setNotice('Batch sorted successfully. Creating the session QR…');
+    setDisplayState('sorted');
+    window.setTimeout(() => finishSession({ itemsOverride: [sortedItem] }), 0);
   }
 
   async function submitHardwareConfirmation(accepted) {
@@ -617,13 +634,13 @@ function BinDisplayDashboard({ onExit }) {
   async function confirmDetection() {
     try {
       setBusy(true);
-      setNotice('Confirmed. Sorting the item now…');
+      setNotice('Confirmed. Sorting this batch now…');
       await submitHardwareConfirmation(true);
       if (!detectedItem?.hardwareData) {
         setDetectionConfirmed(true);
         setBusy(false);
       } else {
-        setDisplayState('detecting');
+        setDisplayState('sorting');
       }
     } catch (error) {
       setBusy(false);
@@ -633,6 +650,7 @@ function BinDisplayDashboard({ onExit }) {
 
   function waitForNextItem() {
     setDetectedItem(null);
+    setPlatformCleared(false);
     setDetectionConfirmed(false);
     setDisplayState('ready');
     setNotice('');
@@ -644,8 +662,8 @@ function BinDisplayDashboard({ onExit }) {
       setItems((currentItems) => currentItems.filter((item) => item.id !== detectedItem?.id));
       setDetectedItem(null);
       setDetectionConfirmed(false);
-      setDisplayState('ready');
-      setNotice('Incorrect detection rejected. The motors did not move. Remove the item and try again.');
+      setDisplayState('waiting-empty');
+      setNotice('Incorrect detection rejected. The motors did not move. Remove all objects from the platform.');
     } catch (error) {
       setNotice(error.message);
     }
@@ -657,13 +675,25 @@ function BinDisplayDashboard({ onExit }) {
       setNotice('Incorrect display password.');
       return;
     }
-    if (deviceKey.trim()) {
-      localStorage.setItem('trashquest_bin_device_key', deviceKey.trim());
+    const normalizedDeviceKey = deviceKey.trim();
+    if (normalizedDeviceKey) {
+      localStorage.setItem('trashquest_bin_device_key', normalizedDeviceKey);
     } else {
       localStorage.removeItem('trashquest_bin_device_key');
     }
-    setNotice('');
+    setDeviceKey(normalizedDeviceKey);
+    clearSession();
+    gatewaySequence.current = null;
     setIsUnlocked(true);
+  }
+
+  function exitDisplay() {
+    clearTimeout(detectionTimer.current);
+    clearSession();
+    gatewaySequence.current = null;
+    setIsUnlocked(false);
+    setPassword('');
+    onExit();
   }
 
   function saveDeviceKey(event) {
@@ -683,47 +713,28 @@ function BinDisplayDashboard({ onExit }) {
     setNotice('Old device key cleared. Paste the new key, or continue in test mode.');
   }
 
-  function addWaste() {
-    const parsedGrams = Number(grams);
-    if (!currentWaste || !parsedGrams || parsedGrams <= 0) {
-      setNotice('Select a waste type and enter weight in grams.');
-      return;
-    }
-    setItems([
-      ...items,
-      {
-        id: crypto.randomUUID(),
-        wasteType: currentWaste,
-        grams: Math.round(parsedGrams),
-      },
-    ]);
-    setGrams('');
-    setClaim(null);
-    setNotice(`${getWasteLabel(currentWaste)} (${Math.round(parsedGrams)}g) added to session.`);
-  }
-
-  function removeItem(itemId) {
-    setItems(items.filter((item) => item.id !== itemId));
-    setClaim(null);
-  }
-
   function clearSession() {
+    if (gatewaySimulation) {
+      fetch('http://127.0.0.1:8765/simulate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platformEmpty: true }),
+      }).catch(() => {});
+    }
     setItems([]);
     setClaim(null);
     setDetectedItem(null);
+    setPlatformCleared(false);
     setDetectionConfirmed(false);
     setDisplayState('ready');
     setNotice('');
   }
 
-  function handleNotDone() {
-    setNotice('Keep adding waste. Select a type and weight, then tap Add waste.');
-  }
-
   async function finishSession(options = {}) {
     const testMode = options?.testMode === true;
+    const sessionItems = options?.itemsOverride || items;
     const activeDeviceKey = testMode ? '' : deviceKey.trim();
-    if (items.length === 0) {
+    if (sessionItems.length === 0) {
       setNotice('Add at least one waste item before generating a QR code.');
       return;
     }
@@ -733,7 +744,7 @@ function BinDisplayDashboard({ onExit }) {
     setNotice('');
     try {
       const claims = [];
-      for (const item of items) {
+      for (const item of sessionItems) {
         const itemOption = binWasteOptions.find((entry) => entry.value === item.wasteType);
         let claimData;
         if (item.claimToken) {
@@ -744,16 +755,15 @@ function BinDisplayDashboard({ onExit }) {
             headers: { 'x-device-key': activeDeviceKey },
             body: {
               wasteType: item.wasteType,
-              quantity: item.grams / 1000,
-              itemCount: 1,
+              itemCount: item.itemCount || 1,
               detectionId: item.id,
             },
           });
           claimData = response.data;
         } else {
           claimData = {
-            claimToken: `trashquest-test:${item.wasteType}:${item.grams}:${item.id}`,
-            pointsAvailable: estimatePoints(item.wasteType, item.grams),
+            claimToken: `trashquest-test:${item.wasteType}:${item.itemCount || 1}:${item.id}`,
+            pointsAvailable: item.pointsAvailable || 0,
             expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
           };
         }
@@ -761,7 +771,7 @@ function BinDisplayDashboard({ onExit }) {
           wasteType: item.wasteType,
           label: itemOption?.label || item.wasteType,
           icon: itemOption?.icon || '♻',
-          grams: item.grams,
+          itemCount: item.itemCount || 1,
           pointsAvailable: claimData.pointsAvailable,
           claimToken: claimData.claimToken,
           expiresAt: claimData.expiresAt,
@@ -795,7 +805,7 @@ function BinDisplayDashboard({ onExit }) {
         qrImage,
         sessionCode,
         testMode: !activeDeviceKey,
-        totalGrams: claims.reduce((sum, entry) => sum + entry.grams, 0),
+        totalItems: claims.reduce((sum, entry) => sum + entry.itemCount, 0),
         totalPoints: claims.reduce((sum, entry) => sum + entry.pointsAvailable, 0),
       });
       setItems([]);
@@ -853,7 +863,7 @@ function BinDisplayDashboard({ onExit }) {
       <header className="kiosk-header">
         <div className="kiosk-brand"><span>TQ</span><strong>TrashQuest</strong></div>
         <div className="station-status"><i /> {gatewayOnline ? 'Hardware connected' : 'Test mode'}</div>
-        <button type="button" className="kiosk-exit" onClick={onExit}>Exit display</button>
+        <button type="button" className="kiosk-exit" onClick={exitDisplay}>Exit display</button>
       </header>
 
       <aside className={`ai-camera-panel ${cameraVisible ? 'is-open' : 'is-closed'}`}>
@@ -882,12 +892,6 @@ function BinDisplayDashboard({ onExit }) {
                   ))
                 : <span>No AI object detected</span>}
             </div>
-            {cameraStatus.paperProgress > 0 && cameraStatus.paperProgress < 1 && (
-              <div className="ai-paper-hold">
-                <strong>Hold paper steady</strong>
-                <span><i style={{ width: `${cameraStatus.paperProgress * 100}%` }} /></span>
-              </div>
-            )}
           </div>
         )}
       </aside>
@@ -901,8 +905,13 @@ function BinDisplayDashboard({ onExit }) {
               <div className="bin-opening"><i /><i /><i /></div>
             </div>
             <p className="kiosk-kicker">Smart waste station</p>
-            <h1>Drop an item to begin</h1>
-            <p>One item at a time. We’ll identify and sort it automatically.</p>
+            <h1>{binFull ? 'Bin temporarily unavailable' : 'Place one waste type on the platform'}</h1>
+            <p>{binFull ? 'This bin is full and needs collection.' : 'The AI will count each visible object and sort the batch automatically.'}</p>
+            {!binFull && (
+              <div className="plastic-crush-notice">
+                Please crush plastic bottles before placing them on the platform.
+              </div>
+            )}
             {notice && <div className="kiosk-correction-notice">{notice}</div>}
           </div>
         )}
@@ -910,9 +919,9 @@ function BinDisplayDashboard({ onExit }) {
         {displayState === 'detecting' && (
           <div className="kiosk-message detecting-message">
             <div className="scanner-orb"><span>{detectedItem?.icon}</span><i /></div>
-            <p className="kiosk-kicker">Item detected</p>
-            <h1>Analyzing your item…</h1>
-            <p>Our sensors and AI are finding the correct bin.</p>
+            <p className="kiosk-kicker">AI scanning</p>
+            <h1>Analyzing the platform…</h1>
+            <p>Keep the objects still while type and quantity stabilize.</p>
             <div className="scan-progress"><i /></div>
           </div>
         )}
@@ -922,9 +931,10 @@ function BinDisplayDashboard({ onExit }) {
             <div className={`result-icon result-${detectedItem.value.toLowerCase().replace(' ', '-')}`}>
               <span>{detectedItem.icon}</span><i>{detectionConfirmed ? '✓' : '?'}</i>
             </div>
-            <p className="kiosk-kicker">Item identified</p>
-            <h1>{detectedItem.label}</h1>
-            <p>{detectedItem.grams}g · approximately {estimatePoints(detectedItem.value, detectedItem.grams)} {estimatePoints(detectedItem.value, detectedItem.grams) === 1 ? 'point' : 'points'}</p>
+            <p className="kiosk-kicker">Type and quantity detected</p>
+            <h1>{detectedItem.itemCount} {detectedItem.itemCount === 1 ? detectedItem.label : `${detectedItem.label}s`} detected</h1>
+            <p>Confidence: {Math.round(Number(detectedItem.confidence || 0) * 100)}%</p>
+            <p>Points available: {detectedItem.pointsAvailable}</p>
             {!detectionConfirmed ? (
               <div className="classification-review">
                 <strong>Is this identification correct?</strong>
@@ -939,6 +949,24 @@ function BinDisplayDashboard({ onExit }) {
                 <button type="button" className="kiosk-secondary" onClick={finishSession}>I’m done — show QR</button>
               </div>
             )}
+          </div>
+        )}
+
+        {(displayState === 'sorting' || displayState === 'sorted') && (
+          <div className="kiosk-message detecting-message">
+            <div className="scanner-orb"><span>{detectedItem?.icon || '♻'}</span><i /></div>
+            <p className="kiosk-kicker">{displayState === 'sorting' ? 'Sorting in progress' : 'Sorting successful'}</p>
+            <h1>{displayState === 'sorting' ? 'Please wait…' : 'Creating your claim…'}</h1>
+            <p>{displayState === 'sorting' ? 'The station is moving one time for this entire batch.' : 'Points are recorded only after the ESP32 confirms success.'}</p>
+          </div>
+        )}
+
+        {displayState === 'waiting-empty' && (
+          <div className="kiosk-message detecting-message">
+            <div className="scanner-orb"><span>↥</span><i /></div>
+            <p className="kiosk-kicker">Batch cancelled</p>
+            <h1>Clear the platform</h1>
+            <p>{notice || 'Remove all objects. The station will rearm after the platform stays empty.'}</p>
           </div>
         )}
 
@@ -974,7 +1002,7 @@ function BinDisplayDashboard({ onExit }) {
                   <article>
                     <img src={claim.qrImage} alt="QR code for this disposal session" />
                     <strong>{claim.claims.map((entry) => entry.icon).join(' ')} Complete session</strong>
-                    <span>{claim.totalGrams}g · {claim.totalPoints} {claim.totalPoints === 1 ? 'point' : 'points'}</span>
+                    <span>{claim.totalItems} {claim.totalItems === 1 ? 'item' : 'items'} · {claim.totalPoints} {claim.totalPoints === 1 ? 'point' : 'points'}</span>
                   </article>
                 </div>
                 <div className="session-code-block">
@@ -983,7 +1011,8 @@ function BinDisplayDashboard({ onExit }) {
                   <small>Code expires with this disposal session.</small>
                 </div>
                 {claim.testMode && <p className="test-qr-note">Test QR only — add a valid device key for claimable points.</p>}
-                <button type="button" className="kiosk-primary" onClick={clearSession}>Finish & reset station</button>
+                <p className="test-qr-note">{platformCleared ? 'Platform clear — station can be reset.' : 'Remove all objects from the platform to rearm the station.'}</p>
+                <button type="button" className="kiosk-primary" onClick={clearSession} disabled={!platformCleared}>Ready for next batch</button>
               </>
             )}
           </div>
@@ -992,26 +1021,30 @@ function BinDisplayDashboard({ onExit }) {
 
       {items.length > 0 && displayState !== 'qr' && (
         <aside className="session-pill">
-          <span>{items.length} {items.length === 1 ? 'item' : 'items'}</span>
-          <strong>{totalGrams}g · ~{estimatedTotalPoints} pts</strong>
+          <span>{totalItems} {totalItems === 1 ? 'item' : 'items'}</span>
+          <strong>{estimatedTotalPoints} pts</strong>
         </aside>
       )}
 
       <aside className="hardware-test-panel">
-        <span>Hardware test controls</span>
+        <span>Simulation controls</span>
         <div>
           {binWasteOptions.map((option, index) => (
             <button
               type="button"
               key={option.value}
-              onClick={() => handleWasteDetected(option.value, [80, 45, 25][index])}
-              disabled={displayState !== 'ready'}
+              onClick={() => fetch('http://127.0.0.1:8765/simulate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ wasteType: option.value, itemCount: index === 0 ? 3 : 1, confidence: 0.9 }),
+              }).catch(() => setNotice('Start the gateway with --simulate first.'))}
+              disabled={!gatewaySimulation || displayState !== 'ready' || binFull}
             >
               {option.icon} Simulate {option.label}
             </button>
           ))}
         </div>
-        <small>Temporary — replace these buttons with sensor/YOLO events.</small>
+        <small>{gatewaySimulation ? 'No hardware is being controlled.' : 'Start station_gateway.py --simulate to enable.'}</small>
       </aside>
     </main>
   );
@@ -1445,7 +1478,7 @@ function ResidentWallet({ data, loading, refreshData, session, totals }) {
     <div className="view-stack">
       <section className="metric-grid resident-metrics">
         <Metric label="Total points" value={totalPoints} />
-        <Metric label="Waste recorded" value={`${totals.wasteGrams} g`} />
+        <Metric label="Items recorded" value={totals.totalItems} />
       </section>
       <section className="panel">
         <div className="section-heading">
@@ -1550,7 +1583,7 @@ function AdminOverview({ data, totals }) {
     return {
       ...user,
       history,
-      wasteGrams: history.reduce((sum, log) => sum + (log.quantity || 0) * 1000, 0),
+      itemCount: history.reduce((sum, log) => sum + (log.itemCount || 1), 0),
       earnedPoints: history.reduce((sum, log) => sum + (log.pointsAwarded || 0), 0),
     };
   });
@@ -1559,7 +1592,7 @@ function AdminOverview({ data, totals }) {
     <div className="view-stack">
       <section className="metric-grid">
         <Metric label="Resident points" value={totals.disposalPoints} />
-        <Metric label="Waste recorded" value={`${totals.wasteGrams} g`} />
+        <Metric label="Items recorded" value={totals.totalItems} />
         <Metric label="Current quests" value={data.quests.filter((quest) => quest.status !== 'closed' && new Date(quest.expiryDate) >= new Date()).length} />
         <Metric label="Bins needing collection" value={totals.collectionCount} tone="warning" />
       </section>
@@ -1578,7 +1611,7 @@ function AdminOverview({ data, totals }) {
                 <tr className="clickable-row" key={user._id} onClick={() => setSelectedUser(user)} tabIndex="0">
                   <td><strong>{user.name}</strong><span className="cell-subtitle">{user.email}</span></td>
                   <td>{user.history.length}</td>
-                  <td>{Math.round(user.wasteGrams)} g</td>
+                  <td>{user.itemCount} items</td>
                   <td>{user.earnedPoints}</td>
                   <td>{user.history[0] ? formatDate(user.history[0].createdAt) : 'No activity'}</td>
                 </tr>
@@ -1826,10 +1859,9 @@ function AdminQuestTools({ quests, token, runAction, loading }) {
     const form = new FormData(event.currentTarget);
     const wasteType = form.get('wasteType');
     const targetCount = form.get('targetCount') ? Number(form.get('targetCount')) : null;
-    const targetWeightGrams = form.get('targetWeightGrams') ? Number(form.get('targetWeightGrams')) : null;
-    if (!targetCount && !targetWeightGrams) {
+    if (!targetCount) {
       const targetInput = event.currentTarget.querySelector('[name="targetCount"]');
-      targetInput.setCustomValidity('Enter an item target or a weight target.');
+      targetInput.setCustomValidity('Enter an item target.');
       targetInput.reportValidity();
       targetInput.setCustomValidity('');
       return;
@@ -1843,7 +1875,6 @@ function AdminQuestTools({ quests, token, runAction, loading }) {
           description: form.get('description'),
           wasteType: wasteType || null,
           targetCount,
-          targetWeightGrams,
           pointsReward: Number(form.get('pointsReward')),
           startDate: form.get('startDate'),
           expiryDate: form.get('expiryDate'),
@@ -1899,8 +1930,7 @@ function AdminQuestTools({ quests, token, runAction, loading }) {
             {wasteTypes.map((type) => <option key={type}>{type}</option>)}
           </select>
         </label>
-        <label>Item target <span>(optional)</span><input name="targetCount" type="number" min="1" placeholder="None" defaultValue={editingQuest?.targetCount || ''} /></label>
-        <label>Weight target in grams <span>(optional)</span><input name="targetWeightGrams" type="number" min="1" step="1" placeholder="None" defaultValue={editingQuest ? (editingQuest.targetWeightGrams || Number(editingQuest.targetWeightKg || 0) * 1000 || '') : ''} /></label>
+        <label>Item target<input name="targetCount" type="number" min="1" placeholder="Number of objects" defaultValue={editingQuest?.targetCount || ''} required /></label>
         <label>Reward points<input name="pointsReward" type="number" min="0" defaultValue={editingQuest?.pointsReward ?? 50} required /></label>
         <label>Quest type<select name="frequency" defaultValue={editingQuest?.frequency || 'daily'}><option value="daily">Daily quest</option><option value="weekly">Weekly quest</option></select></label>
         <label>Starts<input name="startDate" type="datetime-local" defaultValue={formatDateTimeLocal(editingQuest?.startDate)} required /></label>
@@ -1986,11 +2016,9 @@ function AdminRewardCatalog({ rewards }) {
 }
 
 function getQuestTargetLabel(quest) {
-  const targets = [];
-  if (quest.targetCount) targets.push(`${quest.targetCount} ${quest.targetCount === 1 ? 'item' : 'items'}`);
-  const targetGrams = quest.targetWeightGrams || Number(quest.targetWeightKg || 0) * 1000;
-  if (targetGrams) targets.push(`${targetGrams} g`);
-  return targets.join(' + ') || 'No target';
+  return quest.targetCount
+    ? `${quest.targetCount} ${quest.targetCount === 1 ? 'item' : 'items'}`
+    : 'No item target';
 }
 
 function QuestHistoryTable({ quests, session, admin, onEdit, onDelete }) {
@@ -2021,9 +2049,6 @@ function QuestHistoryTable({ quests, session, admin, onEdit, onDelete }) {
               : participant?.completed ? 'Completed' : 'Ended';
             const progressParts = [];
             if (!admin && quest.targetCount) progressParts.push(`${participant?.progress || 0}/${quest.targetCount} items`);
-            const targetGrams = quest.targetWeightGrams || Number(quest.targetWeightKg || 0) * 1000;
-            const progressGrams = participant?.weightProgressGrams || Number(participant?.weightProgressKg || 0) * 1000;
-            if (!admin && targetGrams) progressParts.push(`${Math.round(progressGrams)}/${targetGrams} g`);
 
             return (
               <tr key={quest._id}>
@@ -2105,21 +2130,14 @@ function QuestView({ quests, session, admin = false, history = false, onEdit, on
             return participantId?.toString() === session?._id?.toString();
           });
           const progress = userProgress?.progress || 0;
-          const weightProgress = userProgress?.weightProgressGrams || Number(userProgress?.weightProgressKg || 0) * 1000;
-          const targetWeightGrams = quest.targetWeightGrams || Number(quest.targetWeightKg || 0) * 1000;
           const countPercent = quest.targetCount ? Math.min(100, Math.round((progress / quest.targetCount) * 100)) : 100;
-          const weightPercent = targetWeightGrams ? Math.min(100, Math.round((weightProgress / targetWeightGrams) * 100)) : 100;
-          const progressPercent = Math.min(countPercent, weightPercent);
+          const progressPercent = countPercent;
           const wasteObjective = quest.wasteType || 'accepted waste';
           const countObjective = quest.targetCount
             ? `${quest.targetCount} ${wasteObjective.toLowerCase()} item${quest.targetCount === 1 ? '' : 's'}`
             : '';
-          const weightObjective = targetWeightGrams ? `${targetWeightGrams} g of ${wasteObjective.toLowerCase()}` : '';
-          const objectiveText = countObjective && weightObjective
-            ? `Drop ${countObjective} with a total weight of ${targetWeightGrams} g.`
-            : countObjective ? `Drop ${countObjective}.` : `Drop ${weightObjective}.`;
+          const objectiveText = `Drop ${countObjective}.`;
           const remainingItems = Math.max(0, Number(quest.targetCount || 0) - progress);
-          const remainingGrams = Math.max(0, targetWeightGrams - weightProgress);
           const isScheduled = quest.startDate && new Date(quest.startDate) > new Date();
           const isExpired = new Date(quest.expiryDate) < new Date();
 
@@ -2142,11 +2160,9 @@ function QuestView({ quests, session, admin = false, history = false, onEdit, on
               <dl className={`quest-stat-grid ${!admin ? 'resident-quest-stats' : ''}`}>
                 {admin && <>
                 <div><dt>Item target</dt><dd>{quest.targetCount || 'None'}</dd></div>
-                <div><dt>Weight target</dt><dd>{targetWeightGrams ? `${targetWeightGrams} g` : 'None'}</dd></div>
                 </>}
                 <div><dt>Reward</dt><dd>{quest.pointsReward} pts</dd></div>
                 <div><dt>{admin ? 'Tracked' : 'Items'}</dt><dd>{admin ? participantCount : quest.targetCount ? `${progress}/${quest.targetCount}` : 'Not required'}</dd></div>
-                {!admin && <div><dt>Weight</dt><dd>{targetWeightGrams ? `${Math.round(weightProgress)}/${targetWeightGrams} g` : 'Not required'}</dd></div>}
                 {admin && <div><dt>Completed</dt><dd>{quest.completedCount || 0}</dd></div>}
               </dl>
               {admin && (
@@ -2178,7 +2194,7 @@ function QuestView({ quests, session, admin = false, history = false, onEdit, on
                   </div>
                   <p>{userProgress?.completed
                     ? 'Reward points added automatically.'
-                    : `${remainingItems ? `${remainingItems} item${remainingItems === 1 ? '' : 's'}` : ''}${remainingItems && remainingGrams ? ' and ' : ''}${remainingGrams ? `${Math.ceil(remainingGrams)} g` : ''} remaining. Progress updates after you claim the session.`}</p>
+                    : `${remainingItems} item${remainingItems === 1 ? '' : 's'} remaining. Progress updates after you claim the session.`}</p>
                 </div>
               )}
             </article>
@@ -2495,14 +2511,14 @@ function DisposalTable({ disposals, admin = false, compact = false }) {
                 <div className="session-history-items">
                   {(disposal.items?.length ? disposal.items : [disposal]).map((item, index) => (
                     <span key={item._id || `${disposal._id}-${index}`}>
-                      {item.wasteType} · {Math.round(Number(item.quantity || 0) * 1000)} g
+                      {item.wasteType} · {item.itemCount || 1} {(item.itemCount || 1) === 1 ? 'item' : 'items'}
                     </span>
                   ))}
                 </div>
               </div>
               <div className="session-history-points">
                 <b>+{disposal.pointsAwarded} pts</b>
-                <small>{Math.round(Number(disposal.quantity || 0) * 1000)} g total</small>
+                <small>{disposal.itemCount || 1} {(disposal.itemCount || 1) === 1 ? 'item' : 'items'} total</small>
               </div>
             </article>
           ))}
@@ -2515,7 +2531,7 @@ function DisposalTable({ disposals, admin = false, compact = false }) {
               {admin && <th>User</th>}
               <th>Bin</th>
               <th>Waste</th>
-              <th>Quantity</th>
+              <th>Item count</th>
               <th>Points</th>
               <th>Date</th>
             </tr>
@@ -2526,7 +2542,7 @@ function DisposalTable({ disposals, admin = false, compact = false }) {
                 {admin && <td>{disposal.user?.name || 'Unknown'}</td>}
                 <td>{disposal.bin?.code || 'Unknown'}</td>
                 <td>{disposal.wasteType}</td>
-                <td>{Math.round(Number(disposal.quantity || 0) * 1000)} g</td>
+                <td>{disposal.itemCount || 1}</td>
                 <td>{disposal.pointsAwarded}</td>
                 <td>{formatDate(disposal.createdAt)}</td>
               </tr>
