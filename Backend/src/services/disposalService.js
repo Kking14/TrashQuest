@@ -72,7 +72,7 @@ const getDisposalSessionTokens = async (sessionCode, userID) => {
 };
  
 // Step 1: called by the station only after the ESP32 acknowledges a successful
-// batch sort. Item count comes from stable AI boxes, not resident input.
+// batch sort. The station submits the stable AI count, or one inductive tin can.
 // Bin fullness is reported separately by the ultrasonic sensor. This returns a
 // short-lived claim token for the bin to display as a QR code.
 const createDisposalClaim = async (

@@ -2,7 +2,6 @@
 
 from collections import Counter, deque
 from dataclasses import dataclass
-from statistics import median
 from typing import Iterable
 
 
@@ -23,7 +22,7 @@ class StableBatch:
 
 
 class StableBatchDetector:
-    """Accept one stable single-material set of boxes, then lock until empty."""
+    """Stabilize waste type and box count, then lock until the platform is empty."""
 
     def __init__(self, *, roi, minimum_confidence, stability_seconds, empty_seconds, history_size=24):
         self.roi = roi
@@ -35,6 +34,7 @@ class StableBatchDetector:
         self.signature_since = None
         self.empty_since = None
         self.locked = False
+        self.mixed_blocked = False
 
     def _inside_roi(self, detection):
         x1, y1, x2, y2 = detection.box
@@ -42,8 +42,15 @@ class StableBatchDetector:
         return rx1 <= (x1 + x2) / 2 <= rx2 and ry1 <= (y1 + y2) / 2 <= ry2
 
     def update(self, detections: Iterable[Detection], now: float):
-        accepted = [item for item in detections if item.confidence >= self.minimum_confidence and self._inside_roi(item)]
-        if not accepted:
+        visible = [item for item in detections if item.confidence >= max(0.05, self.minimum_confidence * 0.75) and self._inside_roi(item)]
+        accepted = [item for item in visible if item.confidence >= self.minimum_confidence]
+        waste_types = tuple(sorted({item.waste_type for item in visible}))
+        if len(waste_types) > 1 and not self.mixed_blocked:
+            self.mixed_blocked = True
+            self.locked = True
+            self.empty_since = None
+            return StableBatch(status="mixed", waste_types=waste_types)
+        if not visible:
             self.history.clear()
             self.signature = None
             self.signature_since = None
@@ -51,10 +58,18 @@ class StableBatchDetector:
                 self.empty_since = now
             if self.locked and now - self.empty_since >= self.empty_seconds:
                 self.locked = False
+                self.mixed_blocked = False
                 return StableBatch(status="rearmed")
             return None
 
         self.empty_since = None
+        if self.mixed_blocked:
+            return None
+        if not accepted:
+            self.signature = None
+            self.signature_since = None
+            self.history.clear()
+            return None
         counts = Counter(item.waste_type for item in accepted)
         signature = tuple(sorted(counts.items()))
         if signature != self.signature:
@@ -69,9 +84,8 @@ class StableBatchDetector:
         if len(waste_types) != 1:
             return StableBatch(status="mixed", waste_types=waste_types)
         waste_type = waste_types[0]
-        stable_counts = [entry[waste_type] for entry in self.history if set(entry) == {waste_type}]
         confidences = [item.confidence for item in accepted if item.waste_type == waste_type]
-        return StableBatch("accepted", waste_type, max(1, int(median(stable_counts))), sum(confidences) / len(confidences))
+        return StableBatch("accepted", waste_type, counts[waste_type], sum(confidences) / len(confidences))
 
 
 class BatchCoordinator:

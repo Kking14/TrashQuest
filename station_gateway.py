@@ -49,6 +49,14 @@ def parse_roi(value: str) -> tuple[float, float, float, float]:
 MODEL_PATH = Path(os.getenv("TQ_MODEL_PATH", "paper detection/best.pt"))
 if not MODEL_PATH.is_absolute():
     MODEL_PATH = ROOT / MODEL_PATH
+MODEL_OPTIONS = {
+    "current": ("Current YOLOv8s · PyTorch", MODEL_PATH),
+    "yolov8s-onnx": ("YOLOv8s · ONNX", ROOT / "models/yolov8s/best.onnx"),
+    "yolov8s-ncnn": ("YOLOv8s · NCNN", ROOT / "models/yolov8s/best_ncnn_model"),
+    "yolo26n-pt": ("YOLO26n · PyTorch", ROOT / "models/yolo26n/best.pt"),
+    "yolo26n-onnx": ("YOLO26n · ONNX", ROOT / "models/yolo26n/best.onnx"),
+    "yolo26n-ncnn": ("YOLO26n · NCNN", ROOT / "models/yolo26n/best_ncnn_model"),
+}
 SERIAL_PORT = os.getenv("TQ_SERIAL_PORT", "COM3")
 BAUD_RATE = int(os.getenv("TQ_BAUD_RATE", "115200"))
 CAMERA_INDEX = int(os.getenv("TQ_CAMERA_INDEX", "0"))
@@ -56,13 +64,12 @@ CONFIDENCE = float(os.getenv("TQ_DETECTION_CONFIDENCE", os.getenv("TQ_CONFIDENCE
 PLATFORM_ROI = parse_roi(os.getenv("TQ_PLATFORM_ROI", "0.15,0.18,0.85,0.88"))
 STABILITY_SECONDS = float(os.getenv("TQ_COUNT_STABILITY_SECONDS", "1.5"))
 EMPTY_REARM_SECONDS = float(os.getenv("TQ_PLATFORM_EMPTY_SECONDS", "1.2"))
-CONFIRMATION_TIMEOUT = float(os.getenv("TQ_CONFIRMATION_TIMEOUT_SECONDS", "120"))
 SORT_TIMEOUT = float(os.getenv("TQ_SORT_TIMEOUT_SECONDS", "30"))
 HTTP_TIMEOUT = float(os.getenv("TQ_HTTP_TIMEOUT_SECONDS", "8"))
 BACKEND_URL = os.getenv("TQ_BACKEND_URL", "http://127.0.0.1:5001").rstrip("/")
 DEVICE_KEY = os.getenv("TQ_DEVICE_KEY", "")
 LOCAL_PORT = int(os.getenv("TQ_GATEWAY_PORT", "8765"))
-PREVIEW_FPS = float(os.getenv("TQ_PREVIEW_FPS", "8"))
+PREVIEW_FPS = float(os.getenv("TQ_PREVIEW_FPS", "20"))
 JPEG_QUALITY = int(os.getenv("TQ_JPEG_QUALITY", "80"))
 SIMULATION_MODE = env_bool("TQ_SIMULATION_MODE")
 SIMULATION_USE_BACKEND = env_bool("TQ_SIMULATION_USE_BACKEND")
@@ -70,7 +77,7 @@ SIMULATION_USE_BACKEND = env_bool("TQ_SIMULATION_USE_BACKEND")
 # Production rates are loaded from the authenticated backend endpoint so the
 # backend remains the one authoritative configuration location.
 POINTS_PER_ITEM: dict[str, float] = {}
-SIMULATION_POINT_RATES = {"Paper": 1, "Plastic": 2, "Tin Can": 2}
+SIMULATION_POINT_RATES = {"Paper": 5, "Plastic": 10, "Tin Can": 15}
 DEFAULT_ESTIMATED_GRAMS = {"Paper": 80, "Plastic": 45, "Tin Can": 25}
 DEFAULT_CLASS_MAP = {
     "PAPER": "Paper", "CARDBOARD": "Paper",
@@ -92,14 +99,58 @@ sequence = 0
 station_status = {
     "online": False, "serial": False, "camera": False,
     "simulation": SIMULATION_MODE, "workflowState": "IDLE",
-    "binFull": False, "platformClear": False, "activeSource": None, "lastError": None,
+    "acceptingItems": True, "binFull": False, "platformClear": False, "activeSource": None, "lastError": None,
+    "activeModel": "current", "modelSwitching": False,
 }
+model_lock = threading.Lock()
+active_model = None
+active_model_key = "current"
+model_generation = 0
+model_switching = False
+MIXED_WASTE_MESSAGE = "Two different waste types detected. Please put only one waste type at a time. Remove all items to try again."
+sensor_interlock_lock = threading.Lock()
+sensor_clear_since = None
+
+
+def update_sensor_interlock(*, metal=None, ai_visible=None):
+    """Latch simultaneous metal/camera detections until both sensors stay clear."""
+    global sensor_clear_since
+    with sensor_interlock_lock:
+        if metal is not None:
+            station_status["inductiveActive"] = bool(metal)
+        if ai_visible is not None:
+            station_status["aiWasteVisible"] = bool(ai_visible)
+        metal_active = station_status.get("inductiveActive", False)
+        camera_active = station_status.get("aiWasteVisible", False)
+        ai_sort_active = (station_status.get("activeSource") == "ai_camera"
+                          and station_status.get("workflowState") in {"PREPARING", "SORTING"})
+        metal_sort_active = (station_status.get("activeSource") == "inductive_sensor"
+                            and station_status.get("workflowState") in {"PREPARING", "SORTING"})
+        if (metal_active and (camera_active or ai_sort_active)) or (camera_active and metal_sort_active):
+            if not station_status.get("sensorMixedBlocked"):
+                publish({"type": "mixed_waste_rejected", "message": MIXED_WASTE_MESSAGE})
+            station_status["sensorMixedBlocked"] = True
+        if metal_active or camera_active:
+            sensor_clear_since = None
+        elif station_status.get("sensorMixedBlocked"):
+            if sensor_clear_since is None:
+                sensor_clear_since = time.monotonic()
+            elif time.monotonic() - sensor_clear_since >= EMPTY_REARM_SECONDS:
+                station_status["sensorMixedBlocked"] = False
+                publish({"type": "mixed_waste_cleared"})
+        return station_status.get("sensorMixedBlocked", False)
+
+
+def mixed_waste_blocked():
+    return station_status.get("mixedWasteBlocked", False) or station_status.get("sensorMixedBlocked", False)
 frame_lock = threading.Condition()
 latest_jpeg: bytes | None = None
 vision_sequence = 0
-pending_confirmations: dict[str, queue.Queue[bool]] = {}
-confirmation_lock = threading.Lock()
+camera_frames = queue.Queue(maxsize=1)
+camera_stop = threading.Event()
+preview_annotations = (0.0, [])
 coordinator = BatchCoordinator()
+ignored_detection_ids = deque(maxlen=200)
 
 
 def publish(event: dict) -> None:
@@ -221,6 +272,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
         if path == "/health":
             self._json(200, station_status)
             return
+        if path == "/models":
+            self._json(200, {"active": active_model_key, "switching": model_switching,
+                             "options": [{"id": key, "label": label, "available": path.exists()}
+                                         for key, (label, path) in MODEL_OPTIONS.items()]})
+            return
         if path == "/events":
             after = 0
             for part in query.split("&"):
@@ -263,19 +319,30 @@ class GatewayHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             body = self._read_json()
-            if self.path == "/confirm":
-                detection_id = str(body.get("detectionId") or "")
-                accepted = body.get("accepted")
-                with confirmation_lock:
-                    confirmation = pending_confirmations.get(detection_id)
-                if not detection_id or not isinstance(accepted, bool):
-                    self._json(400, {"message": "detectionId and boolean accepted are required"})
-                elif confirmation is None:
-                    self._json(404, {"message": "Detection is no longer waiting for confirmation"})
+            if self.path == "/models/select":
+                origin = self.headers.get("Origin")
+                if origin and origin not in {"http://127.0.0.1:5173", "http://localhost:5173"}:
+                    self._json(403, {"message": "Model selection is available only from the local station display."})
+                    return
+                try:
+                    selected = select_model(body.get("id"))
+                except KeyError:
+                    self._json(400, {"message": "Unknown model."})
+                    return
+                except RuntimeError as error:
+                    self._json(409, {"message": str(error)})
+                    return
+                except Exception as error:
+                    self._json(422, {"message": f"Model could not be loaded: {error}"})
+                    return
+                self._json(200, {"active": selected, "message": "Model ready."})
+                return
+            if self.path == "/continue":
+                if coordinator.active_detection_id:
+                    self._json(409, {"message": "Wait for the platform to clear before continuing."})
                 else:
-                    try: confirmation.put_nowait(accepted)
-                    except queue.Full: pass
-                    self._json(202, {"success": True, "accepted": accepted})
+                    station_status["acceptingItems"] = True
+                    self._json(202, {"success": True})
                 return
             if self.path == "/simulate" and SIMULATION_MODE:
                 if body.get("platformEmpty") is True:
@@ -333,6 +400,15 @@ def serial_reader(device) -> None:
                     raise
                 message = json.loads(line[object_start:object_end + 1])
             if not isinstance(message, dict): continue
+            if message.get("event") == "inductive_state":
+                update_sensor_interlock(metal=message.get("active", False))
+                continue
+            if message.get("event") == "inductive_detected":
+                update_sensor_interlock(metal=True)
+            if message.get("event") == "mixed_waste_detected":
+                station_status["sensorMixedBlocked"] = True
+                publish({"type": "mixed_waste_rejected", "message": MIXED_WASTE_MESSAGE})
+                continue
             if message.get("event") == "bin_fullness":
                 station_status["binFull"] = bool(message.get("isFull"))
                 try: backend_jobs.put_nowait({"kind": "fullness", **message})
@@ -375,11 +451,14 @@ def send(device, message: dict) -> None:
 def wait_for_event(detection_id: str, event_name: str, timeout: float) -> dict | None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        if mixed_waste_blocked():
+            return None
         try:
             message = workflow_events.get(timeout=min(0.25, max(0.01, deadline - time.monotonic())))
         except queue.Empty:
             continue
         if message.get("event") == "inductive_detected":
+            update_sensor_interlock(metal=True)
             station_status["lastInductiveDetectionAt"] = time.time()
             publish({"type": "inductive_confirmation", **message})
             continue
@@ -392,7 +471,59 @@ def wait_for_event(detection_id: str, event_name: str, timeout: float) -> dict |
 
 def normalize_class(name: str) -> str | None:
     result = CLASS_MAP.get(name.strip().upper())
-    return result if result in SUPPORTED_WASTE_TYPES else None
+    return result if result in {"Paper", "Plastic"} else None
+
+
+def select_model(key: str, loader=None) -> str:
+    """Warm a candidate before swapping; a failed load leaves the live model intact."""
+    global active_model, active_model_key, model_generation, model_switching
+    if key not in MODEL_OPTIONS:
+        raise KeyError(key)
+    if not model_lock.acquire(blocking=False):
+        raise RuntimeError("Another model change is already in progress.")
+    try:
+        if key == active_model_key:
+            return key
+        if (SIMULATION_MODE or active_model is None or not station_status.get("online")
+                or station_status.get("workflowState") != "IDLE"
+                or coordinator.active_detection_id or mixed_waste_blocked()
+                or not station_status.get("platformClear")):
+            raise RuntimeError("Wait until the station is idle and the platform is empty.")
+        label, path = MODEL_OPTIONS[key]
+        if not path.exists():
+            raise FileNotFoundError(f"Model files are missing: {path}")
+        import numpy as np
+        if loader is None:
+            from ultralytics import YOLO
+            loader = YOLO
+
+        model_switching = True
+        station_status["modelSwitching"] = True
+        was_accepting = station_status["acceptingItems"]
+        station_status["acceptingItems"] = False
+        try:
+            candidate = loader(str(path))
+            candidate.predict(np.zeros((640, 640, 3), dtype=np.uint8), imgsz=640,
+                              conf=max(0.05, CONFIDENCE * 0.75), verbose=False)
+            names = candidate.names.values() if isinstance(candidate.names, dict) else candidate.names
+            if not {"Paper", "Plastic"}.issubset({normalize_class(str(name)) for name in names}):
+                raise ValueError(f"{label} does not contain both paper and plastic classes")
+            if (station_status.get("workflowState") != "IDLE"
+                    or coordinator.active_detection_id or not station_status.get("platformClear")):
+                raise RuntimeError("The platform changed while loading the model. Try again when empty.")
+            active_model = candidate
+            active_model_key = key
+            model_generation += 1
+            station_status["activeModel"] = key
+            station_status["detections"] = []
+            publish({"type": "model_changed", "model": key, "label": label})
+            return key
+        finally:
+            station_status["acceptingItems"] = was_accepting
+            station_status["modelSwitching"] = False
+            model_switching = False
+    finally:
+        model_lock.release()
 
 
 def batch_from_inductive(message: dict) -> dict:
@@ -407,29 +538,87 @@ def batch_from_inductive(message: dict) -> dict:
     }
 
 
-def vision_loop(model, camera) -> None:
+def offer_latest_frame(frame, captured_at):
+    """Keep only the newest frame; slow inference must never block capture."""
+    try:
+        camera_frames.get_nowait()
+    except queue.Empty:
+        pass
+    camera_frames.put_nowait((frame, captured_at))
+
+
+def camera_preview_loop(camera) -> None:
     import cv2
     global latest_jpeg, vision_sequence
+    previous = None
+    while not camera_stop.is_set():
+        started = time.monotonic()
+        ok, frame = camera.read()
+        if not ok:
+            station_status.update(camera=False, platformClear=False, lastError="Camera frame could not be read")
+            camera_stop.wait(0.2)
+            continue
+        captured_at = time.monotonic()
+        offer_latest_frame(frame.copy(), captured_at)
+        height, width = frame.shape[:2]
+        annotated_at, annotations = preview_annotations
+        # Boxes update at inference speed; expire them if inference stops.
+        if captured_at - annotated_at < 1.0:
+            for label, confidence, bounds, color in annotations:
+                x1, y1, x2, y2 = bounds
+                cv2.rectangle(frame, (int(x1 * width), int(y1 * height)), (int(x2 * width), int(y2 * height)), color, 2)
+                cv2.putText(frame, f"{label} {confidence:.0%}", (int(x1 * width), max(18, int(y1 * height) - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+        rx1, ry1, rx2, ry2 = PLATFORM_ROI
+        cv2.rectangle(frame, (int(rx1 * width), int(ry1 * height)), (int(rx2 * width), int(ry2 * height)), (40, 220, 240), 2)
+        cv2.putText(frame, "PLATFORM ROI", (int(rx1 * width), max(20, int(ry1 * height) - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40, 220, 240), 2)
+        encoded, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        if encoded:
+            with frame_lock:
+                latest_jpeg = jpeg.tobytes()
+                vision_sequence += 1
+                frame_lock.notify_all()
+            now = time.monotonic()
+            fps = 0 if previous is None else 1 / max(now - previous, 0.001)
+            previous = now
+            station_status.update(camera=True, previewFps=round(fps, 1), lastFrameAt=time.time())
+        camera_stop.wait(max(0, 1 / max(PREVIEW_FPS, 1) - (time.monotonic() - started)))
+
+
+def vision_loop(model) -> None:
+    global preview_annotations
     detector = StableBatchDetector(
         roi=PLATFORM_ROI, minimum_confidence=CONFIDENCE,
         stability_seconds=STABILITY_SECONDS, empty_seconds=EMPTY_REARM_SECONDS,
     )
     clear_tracker = PlatformClearTracker(EMPTY_REARM_SECONDS)
     previous = time.perf_counter()
-    while True:
-        ok, frame = camera.read()
-        if not ok:
-            station_status.update(camera=False, lastError="Camera frame could not be read")
-            time.sleep(0.2)
+    seen_generation = model_generation
+    while not camera_stop.is_set():
+        try:
+            frame, captured_at = camera_frames.get(timeout=0.25)
+        except queue.Empty:
             continue
+        if model_switching:
+            continue
+        if seen_generation != model_generation:
+            detector = StableBatchDetector(
+                roi=PLATFORM_ROI, minimum_confidence=CONFIDENCE,
+                stability_seconds=STABILITY_SECONDS, empty_seconds=EMPTY_REARM_SECONDS,
+            )
+            clear_tracker = PlatformClearTracker(EMPTY_REARM_SECONDS)
+            seen_generation = model_generation
+        selected_model = active_model or model
         height, width = frame.shape[:2]
-        result = model.predict(frame, conf=max(0.05, CONFIDENCE * 0.75), verbose=False)[0]
+        result = selected_model.predict(frame, conf=max(0.05, CONFIDENCE * 0.75), verbose=False)[0]
+        if model_switching or seen_generation != model_generation:
+            continue
         accepted_detections = []
         display_detections = []
+        annotations = []
         platform_has_object = False
         for model_box in result.boxes:
             class_id = int(model_box.cls[0])
-            class_name = str(model.names[class_id])
+            class_name = str(selected_model.names[class_id])
             waste_type = normalize_class(class_name)
             confidence = float(model_box.conf[0])
             x1, y1, x2, y2 = map(float, model_box.xyxy[0])
@@ -441,23 +630,24 @@ def vision_loop(model, camera) -> None:
                 platform_has_object = True
             display_detections.append({"className": class_name, "wasteType": waste_type, "confidence": confidence, "inPlatformRoi": in_roi})
             color = (66, 214, 137) if waste_type and in_roi else (120, 120, 120)
-            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-            cv2.putText(frame, f"{class_name} {confidence:.0%}", (int(x1), max(18, int(y1) - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
-
-        rx1, ry1, rx2, ry2 = PLATFORM_ROI
-        cv2.rectangle(frame, (int(rx1 * width), int(ry1 * height)), (int(rx2 * width), int(ry2 * height)), (40, 220, 240), 2)
-        cv2.putText(frame, "PLATFORM ROI", (int(rx1 * width), max(20, int(ry1 * height) - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40, 220, 240), 2)
-        monotonic_now = time.monotonic()
+            annotations.append((class_name, confidence, normalized_box, color))
+        preview_annotations = (captured_at, annotations)
+        monotonic_now = captured_at
         stable = detector.update(accepted_detections, monotonic_now)
-        if stable and stable.status == "accepted":
+        station_status["mixedWasteBlocked"] = detector.mixed_blocked
+        update_sensor_interlock(ai_visible=any(item.confidence >= max(0.05, CONFIDENCE * 0.75) and detector._inside_roi(item) for item in accepted_detections))
+        station_status["lastInferenceCapturedAt"] = captured_at
+        if stable and stable.status == "accepted" and not mixed_waste_blocked():
             workflow_events.put({
                 "event": "camera_batch", "detectionId": f"camera-{uuid.uuid4()}",
                 "wasteType": stable.waste_type, "itemCount": stable.item_count,
                 "confidence": stable.confidence, "source": "ai_camera",
             })
         elif stable and stable.status == "mixed":
-            publish({"type": "mixed_waste_rejected", "wasteTypes": stable.waste_types, "message": "Mixed waste detected. Remove all items and place one waste type at a time."})
+            publish({"type": "mixed_waste_rejected", "wasteTypes": stable.waste_types, "message": MIXED_WASTE_MESSAGE})
         elif stable and stable.status == "rearmed":
+            if not mixed_waste_blocked():
+                publish({"type": "mixed_waste_cleared"})
             workflow_events.put({"event": "platform_empty"})
 
         active_detection_id = coordinator.active_detection_id
@@ -476,26 +666,30 @@ def vision_loop(model, camera) -> None:
         now = time.perf_counter()
         fps = 1 / max(now - previous, 0.001)
         previous = now
-        encoded, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-        if encoded:
-            with frame_lock:
-                latest_jpeg = jpeg.tobytes()
-                vision_sequence += 1
-                frame_lock.notify_all()
         station_status.update(
-            camera=True, visionFps=round(fps, 1), detections=display_detections,
+            visionFps=round(fps, 1), detections=display_detections,
             scanning=bool(accepted_detections) and not detector.locked,
             platformClear=platform_clear,
-            lastFrameAt=time.time(),
+            lastInferenceAt=time.time(),
         )
-        elapsed = time.perf_counter() - now
-        time.sleep(max(0, (1 / max(PREVIEW_FPS, 1)) - elapsed))
 
 
 def handle_batch(device, batch: dict) -> None:
     detection_id = str(batch["detectionId"])
+    if mixed_waste_blocked():
+        if batch.get("source") == "inductive_sensor":
+            send(device, {"command": "recover", "detectionId": detection_id})
+        publish({"type": "mixed_waste_rejected", "message": MIXED_WASTE_MESSAGE})
+        return
+    if not station_status.get("acceptingItems", True):
+        if batch.get("source") == "inductive_sensor":
+            ignored_detection_ids.append(detection_id)
+            send(device, {"command": "recover", "detectionId": detection_id})
+        publish({"type": "busy", "detectionId": detection_id, "message": "Choose Not done before placing the next item."})
+        return
     if station_status.get("binFull"):
         if batch.get("source") == "inductive_sensor":
+            ignored_detection_ids.append(detection_id)
             send(device, {"command": "recover", "detectionId": detection_id})
         publish({"type": "rejected", "detectionId": detection_id, "message": "Bin is full and needs collection."})
         return
@@ -503,28 +697,43 @@ def handle_batch(device, batch: dict) -> None:
         publish({"type": "busy", "detectionId": detection_id, "message": "Another batch is active"})
         return
     station_status["activeSource"] = batch.get("source", "ai_camera")
-    item_count = max(1, int(batch.get("itemCount") or 1))
+    item_count = 1 if batch["wasteType"] == "Tin Can" else max(1, min(100, int(batch.get("itemCount") or 1)))
     batch.update(itemCount=item_count, confidence=round(float(batch.get("confidence") or 0), 3))
-    set_workflow("WAITING_FOR_CONFIRMATION")
+    set_workflow("PREPARING")
     send(device, {"command": "prepare", "detectionId": detection_id, "wasteType": batch["wasteType"], "itemCount": item_count, "source": batch.get("source", "ai_camera")})
     publish({"type": "item_detected", **batch, "pointsAvailable": round(POINTS_PER_ITEM[batch["wasteType"]] * item_count)})
 
-    confirmation = queue.Queue(maxsize=1)
-    with confirmation_lock: pending_confirmations[detection_id] = confirmation
-    try:
-        accepted = confirmation.get(timeout=CONFIRMATION_TIMEOUT)
-    except queue.Empty:
-        accepted = False
-        publish({"type": "error", "detectionId": detection_id, "message": "Confirmation timed out. Remove the batch."})
-    finally:
-        with confirmation_lock: pending_confirmations.pop(detection_id, None)
-
-    if not accepted:
-        send(device, {"command": "reject", "detectionId": detection_id})
-        publish({"type": "detection_cancelled", "detectionId": detection_id})
-        set_workflow("WAITING_FOR_PLATFORM_EMPTY")
+    prepared = wait_for_event(detection_id, "prepared", SORT_TIMEOUT)
+    prepare_error = "ESP32 could not prepare; no item was counted."
+    if prepared and batch.get("source") == "inductive_sensor" and not SIMULATION_MODE:
+        # Wait for an image captured after the metal reservation, not an old empty frame.
+        capture_after = time.monotonic()
+        deadline = capture_after + 8
+        while (not mixed_waste_blocked() and time.monotonic() < deadline
+               and station_status.get("lastInferenceCapturedAt", 0) <= capture_after):
+            time.sleep(0.05)
+        if station_status.get("lastInferenceCapturedAt", 0) <= capture_after:
+            prepared = None
+            prepare_error = "Camera check timed out. Remove the items and try again; no item was counted."
+    if mixed_waste_blocked():
+        send(device, {"command": "recover", "detectionId": detection_id})
+        coordinator.clear()
+        set_workflow("IDLE")
+        publish({"type": "mixed_waste_rejected", "message": MIXED_WASTE_MESSAGE})
+        return
+    if not prepared or not prepared.get("success"):
+        send(device, {"command": "recover", "detectionId": detection_id})
+        coordinator.clear()
+        set_workflow("IDLE", prepare_error)
+        publish({"type": "error", "detectionId": detection_id, "message": prepare_error})
         return
 
+    if mixed_waste_blocked():
+        send(device, {"command": "recover", "detectionId": detection_id})
+        coordinator.clear()
+        set_workflow("IDLE")
+        publish({"type": "mixed_waste_rejected", "message": MIXED_WASTE_MESSAGE})
+        return
     set_workflow("SORTING")
     send(device, {
         "command": "sort", "detectionId": detection_id, "wasteType": batch["wasteType"],
@@ -532,6 +741,12 @@ def handle_batch(device, batch: dict) -> None:
         "source": batch.get("source", "ai_camera"),
     })
     result = wait_for_event(detection_id, "sorted", SORT_TIMEOUT)
+    if mixed_waste_blocked():
+        send(device, {"command": "recover", "detectionId": detection_id})
+        coordinator.clear()
+        set_workflow("IDLE")
+        publish({"type": "mixed_waste_rejected", "message": MIXED_WASTE_MESSAGE})
+        return
     if not result or not result.get("success"):
         message = "ESP32 sorting failed or timed out; no claim was created."
         publish({"type": "error", "detectionId": detection_id, "message": message})
@@ -540,6 +755,7 @@ def handle_batch(device, batch: dict) -> None:
         set_workflow("ERROR_RECOVERY", message)
         set_workflow("IDLE")
         return
+    station_status["acceptingItems"] = False
     publish({"type": "sorting_successful", **batch})
     backend_jobs.put({"kind": "claim", "batch": dict(batch)})
     set_workflow("WAITING_FOR_PLATFORM_EMPTY")
@@ -551,36 +767,53 @@ def workflow_loop(device) -> None:
     while station_status["serial"]:
         try: message = workflow_events.get(timeout=0.5)
         except queue.Empty: continue
-        event_name = message.get("event")
-        if event_name == "camera_batch":
-            handle_batch(device, message)
-        elif event_name == "platform_empty":
-            active_id = coordinator.active_detection_id
-            if active_id:
-                send(device, {"command": "platform_empty", "detectionId": active_id})
-                publish({"type": "platform_empty", "detectionId": active_id})
-                coordinator.clear()
-                station_status["activeSource"] = None
-            set_workflow("IDLE")
-        elif event_name == "inductive_detected":
-            station_status["lastInductiveDetectionAt"] = time.time()
-            publish({"type": "inductive_confirmation", **message})
-            handle_batch(device, batch_from_inductive(message))
-        elif event_name in {"timeout", "error"}:
-            publish({"type": "error", "detectionId": message.get("detectionId"), "message": message.get("message", "ESP32 error")})
+        process_workflow_event(device, message)
+
+
+def process_workflow_event(device, message: dict) -> None:
+    event_name = message.get("event")
+    detection_id = message.get("detectionId")
+    if detection_id in ignored_detection_ids:
+        if event_name in {"timeout", "error"}:
+            publish({"type": "detection_ignored", "detectionId": detection_id,
+                     "message": "Remove the extra item, then choose Not done before placing more waste."})
+        return
+    if event_name == "camera_batch":
+        handle_batch(device, message)
+    elif event_name == "platform_empty":
+        active_id = coordinator.active_detection_id
+        if active_id:
+            send(device, {"command": "platform_empty", "detectionId": active_id})
+            publish({"type": "platform_empty", "detectionId": active_id})
             coordinator.clear()
-            set_workflow("IDLE")
+            station_status["activeSource"] = None
+        set_workflow("IDLE")
+    elif event_name == "inductive_detected":
+        update_sensor_interlock(metal=True)
+        station_status["lastInductiveDetectionAt"] = time.time()
+        publish({"type": "inductive_confirmation", **message})
+        handle_batch(device, batch_from_inductive(message))
+    elif event_name in {"timeout", "error"}:
+        if not coordinator.matches(detection_id):
+            publish({"type": "station_warning", "detectionId": detection_id,
+                     "message": message.get("message", "ESP32 warning")})
+            return
+        publish({"type": "error", "detectionId": message.get("detectionId"), "message": message.get("message", "ESP32 error")})
+        coordinator.clear()
+        set_workflow("IDLE")
 
 
 def main(simulate: bool = False) -> None:
-    global SIMULATION_MODE
+    global SIMULATION_MODE, active_model
     SIMULATION_MODE = simulate or SIMULATION_MODE
     station_status["simulation"] = SIMULATION_MODE
     load_point_rates()
     threading.Thread(target=run_local_api, daemon=True).start()
     threading.Thread(target=backend_worker, daemon=True).start()
     camera = None
+    camera_thread = None
     device = None
+    camera_stop.clear()
     try:
         if SIMULATION_MODE:
             device = SimulationSerial()
@@ -592,13 +825,16 @@ def main(simulate: bool = False) -> None:
             if not MODEL_PATH.exists():
                 raise FileNotFoundError(f"YOLO model not found: {MODEL_PATH}")
             model = YOLO(str(MODEL_PATH))
+            active_model = model
             camera = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
             if not camera.isOpened():
                 camera.release()
                 camera = cv2.VideoCapture(CAMERA_INDEX)
             if not camera.isOpened():
                 raise RuntimeError("Camera could not be opened")
-            threading.Thread(target=vision_loop, args=(model, camera), daemon=True).start()
+            camera_thread = threading.Thread(target=camera_preview_loop, args=(camera,), daemon=True)
+            camera_thread.start()
+            threading.Thread(target=vision_loop, args=(model,), daemon=True).start()
             device = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.25, write_timeout=1)
             time.sleep(2)
             station_status.update(online=True, serial=True, camera=True, lastError=None)
@@ -608,6 +844,8 @@ def main(simulate: bool = False) -> None:
         workflow_loop(device)
     finally:
         station_status.update(online=False, serial=False)
+        camera_stop.set()
+        if camera_thread is not None: camera_thread.join(timeout=2)
         if camera is not None: camera.release()
         if device is not None: device.close()
 
