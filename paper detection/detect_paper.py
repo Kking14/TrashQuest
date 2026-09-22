@@ -12,9 +12,10 @@ import threading
 import tkinter as tk
 from tkinter.scrolledtext import ScrolledText
 from datetime import datetime
+from pathlib import Path
 import serial
 
-MODEL_PATH = r"C:\Users\mtaup\OneDrive\Documents\paper detection\best.pt"
+MODEL_PATH = str(Path(__file__).resolve().with_name("best.pt"))
 CONFIDENCE_THRESHOLD = 0.63
 WEBCAM_INDEX = 0
 DISPLAY_FPS = True

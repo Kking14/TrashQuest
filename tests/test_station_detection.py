@@ -10,12 +10,32 @@ class StableBatchDetectorTests(unittest.TestCase):
     def make_detector(self):
         return StableBatchDetector(roi=(0.2, 0.2, 0.8, 0.8), minimum_confidence=0.6, stability_seconds=1.0, empty_seconds=0.5)
 
-    def test_stable_count_uses_individual_boxes(self):
+    def test_counts_three_visible_items(self):
         detector = self.make_detector()
         objects = [box(bounds=(0.25 + i * 0.1, 0.3, 0.3 + i * 0.1, 0.5)) for i in range(3)]
         self.assertIsNone(detector.update(objects, 0.0))
         result = detector.update(objects, 1.1)
         self.assertEqual((result.status, result.waste_type, result.item_count), ("accepted", "Plastic", 3))
+
+    def test_count_must_stabilize_before_sorting(self):
+        detector = self.make_detector()
+        detector.update([box("Paper")], 0.0)
+        two = [box("Paper"), box("Paper", bounds=(0.5, 0.3, 0.6, 0.5))]
+        self.assertIsNone(detector.update(two, 0.8))
+        self.assertIsNone(detector.update(two, 1.1))
+        self.assertEqual(detector.update(two, 1.9).item_count, 2)
+
+    def test_two_papers_then_one_after_platform_clears(self):
+        detector = self.make_detector()
+        two = [box("Paper"), box("Paper", bounds=(0.5, 0.3, 0.6, 0.5))]
+        detector.update(two, 0.0)
+        first = detector.update(two, 1.1)
+        self.assertIsNone(detector.update(two, 2.0))
+        detector.update([], 2.1)
+        self.assertEqual(detector.update([], 2.7).status, "rearmed")
+        detector.update([box("Paper")], 3.0)
+        second = detector.update([box("Paper")], 4.1)
+        self.assertEqual(first.item_count + second.item_count, 3)
 
     def test_filters_confidence_and_roi(self):
         detector = self.make_detector()
@@ -26,9 +46,24 @@ class StableBatchDetectorTests(unittest.TestCase):
     def test_rejects_stable_mixed_waste(self):
         detector = self.make_detector()
         mixed = [box("Plastic"), box("Paper", bounds=(0.5, 0.3, 0.6, 0.5))]
-        detector.update(mixed, 0.0)
-        result = detector.update(mixed, 1.1)
+        result = detector.update(mixed, 0.0)
         self.assertEqual((result.status, result.waste_types), ("mixed", ("Paper", "Plastic")))
+
+    def test_mixed_blocks_even_when_second_type_is_below_sort_threshold(self):
+        detector = self.make_detector()
+        mixed = [box("Plastic"), box("Paper", confidence=0.5)]
+        self.assertEqual(detector.update(mixed, 0.0).status, "mixed")
+        self.assertIsNone(detector.update([box("Plastic")], 2.0))
+        detector.update([], 3.0)
+        self.assertEqual(detector.update([], 3.6).status, "rearmed")
+        detector.update([box("Plastic")], 4.0)
+        self.assertEqual(detector.update([box("Plastic")], 5.1).status, "accepted")
+
+    def test_mixed_can_block_an_already_queued_single_type_batch(self):
+        detector = self.make_detector()
+        detector.update([box()], 0.0)
+        self.assertEqual(detector.update([box()], 1.1).status, "accepted")
+        self.assertEqual(detector.update([box(), box("Paper")], 1.2).status, "mixed")
 
     def test_duplicate_is_locked_until_empty(self):
         detector = self.make_detector()

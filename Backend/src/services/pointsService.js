@@ -2,8 +2,7 @@ import dotenv from 'dotenv';
 
 dotenv.config({ quiet: true });
 
-// CONFIGURABLE PLACEHOLDER RATES. Barangay administrators must approve the
-// final values before launch. Environment variables override these defaults.
+// Per-item rewards. Environment variables override these defaults.
 const readRate = (name, fallback) => {
     const value = Number(process.env[name] ?? fallback);
     if (!Number.isFinite(value) || value < 0) {
@@ -13,9 +12,9 @@ const readRate = (name, fallback) => {
 };
 
 const POINTS_PER_ITEM = Object.freeze({
-    Paper: readRate('TQ_POINTS_PER_ITEM_PAPER', 1),
-    Plastic: readRate('TQ_POINTS_PER_ITEM_PLASTIC', 2),
-    'Tin Can': readRate('TQ_POINTS_PER_ITEM_TIN_CAN', 2),
+    Paper: readRate('TQ_POINTS_PER_ITEM_PAPER', 5),
+    Plastic: readRate('TQ_POINTS_PER_ITEM_PLASTIC', 10),
+    'Tin Can': readRate('TQ_POINTS_PER_ITEM_TIN_CAN', 15),
 });
 
 const calculatePoints = (wasteType, itemCount) => {

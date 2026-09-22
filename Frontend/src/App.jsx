@@ -464,13 +464,18 @@ function BinDisplayDashboard({ onExit }) {
   const [claim, setClaim] = useState(null);
   const [displayState, setDisplayState] = useState('ready');
   const [detectedItem, setDetectedItem] = useState(null);
-  const [detectionConfirmed, setDetectionConfirmed] = useState(false);
   const [gatewayOnline, setGatewayOnline] = useState(false);
   const [gatewaySimulation, setGatewaySimulation] = useState(false);
   const [binFull, setBinFull] = useState(false);
   const [platformCleared, setPlatformCleared] = useState(false);
   const [cameraStatus, setCameraStatus] = useState({ fps: null, detections: [], workflowState: 'IDLE' });
   const [cameraVisible, setCameraVisible] = useState(true);
+  const [modelChoices, setModelChoices] = useState([]);
+  const [selectedModel, setSelectedModel] = useState('current');
+  const [activeModel, setActiveModel] = useState('current');
+  const [modelSwitching, setModelSwitching] = useState(false);
+  const [modelError, setModelError] = useState('');
+  const [gatewayPlatformClear, setGatewayPlatformClear] = useState(false);
   const detectionTimer = useRef(null);
   const gatewaySequence = useRef(null);
 
@@ -486,6 +491,19 @@ function BinDisplayDashboard({ onExit }) {
   useEffect(() => () => clearTimeout(detectionTimer.current), []);
 
   useEffect(() => {
+    if (!isUnlocked) return;
+    fetch('http://127.0.0.1:8765/models', { cache: 'no-store' })
+      .then((response) => response.json())
+      .then((data) => {
+        setModelChoices(data.options || []);
+        setActiveModel(data.active || 'current');
+        setSelectedModel(data.active || 'current');
+        setModelError('');
+      })
+      .catch(() => setModelError('Start the station gateway to choose a model.'));
+  }, [isUnlocked, gatewayOnline]);
+
+  useEffect(() => {
     let stopped = false;
     async function pollGateway() {
       try {
@@ -495,15 +513,19 @@ function BinDisplayDashboard({ onExit }) {
           setGatewayOnline(Boolean(status.online && status.serial && status.camera));
           setGatewaySimulation(Boolean(status.simulation));
           setBinFull(Boolean(status.binFull));
+          setGatewayPlatformClear(Boolean(status.platformClear));
+          setActiveModel(status.activeModel || 'current');
+          setModelSwitching(Boolean(status.modelSwitching));
           if (
             status.platformClear
             && detectedItem?.hardwareData?.source !== 'inductive_sensor'
-            && ['qr', 'waiting-empty'].includes(displayState)
+            && ['qr', 'waiting-empty', 'recognized'].includes(displayState)
           ) {
             setPlatformCleared(true);
           }
           setCameraStatus({
-            fps: status.visionFps ?? null,
+            fps: status.previewFps ?? status.visionFps ?? null,
+            inferenceFps: status.visionFps ?? null,
             detections: status.detections || [],
             workflowState: status.workflowState || 'IDLE',
           });
@@ -539,9 +561,15 @@ function BinDisplayDashboard({ onExit }) {
           } else if (event.type === 'mixed_waste_rejected') {
             setDisplayState('ready');
             setNotice(event.message);
+          } else if (event.type === 'mixed_waste_cleared') {
+            setNotice((current) => current.startsWith('Two different waste types detected.') ? 'Platform cleared. Please place only one waste type at a time.' : current);
           } else if (event.type === 'error') {
             setNotice(event.message || 'The station could not record this item.');
-            if (event.detectionId) setDisplayState('waiting-empty');
+            if (event.detectionId) {
+              setDisplayState((current) => ['recognized', 'qr'].includes(current) ? current : 'waiting-empty');
+            }
+          } else if (event.type === 'detection_ignored' || event.type === 'busy') {
+            setNotice(event.message || 'Choose Not done before placing another item.');
           } else if (event.type === 'rejected') {
             setNotice(event.message || 'Item not recognized. Please remove it and try again.');
           }
@@ -566,23 +594,12 @@ function BinDisplayDashboard({ onExit }) {
     setClaim(null);
     setPlatformCleared(false);
     setNotice('');
-    setDetectionConfirmed(false);
     setDetectedItem({
       ...option, id: detectedId, itemCount,
       pointsAvailable: hardwareData?.pointsAvailable ?? 0,
       hardwareData,
     });
-    setDisplayState('detecting');
-    clearTimeout(detectionTimer.current);
-    detectionTimer.current = setTimeout(() => {
-      if (!hardwareData) {
-        setItems((currentItems) => [
-          ...currentItems,
-          { id: detectedId, wasteType, itemCount },
-        ]);
-      }
-      setDisplayState('recognized');
-    }, 900);
+    setDisplayState('sorting');
   }
 
   function handleWasteSorted(event) {
@@ -607,65 +624,44 @@ function BinDisplayDashboard({ onExit }) {
       confidence: event.confidence,
       hardwareData: event,
     }));
-    setDetectionConfirmed(true);
     setBusy(false);
-    setNotice('Batch sorted successfully. Creating the session QR…');
-    setDisplayState('sorted');
-    window.setTimeout(() => finishSession({ itemsOverride: [sortedItem] }), 0);
+    setNotice('Item sorted and added to your session.');
+    setDisplayState('recognized');
   }
 
-  async function submitHardwareConfirmation(accepted) {
-    const detectionId = detectedItem?.hardwareData?.detectionId;
-    if (!detectionId) {
-      if (accepted) setDetectionConfirmed(true);
-      return;
-    }
-    const response = await fetch('http://127.0.0.1:8765/confirm', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ detectionId, accepted }),
-    });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.message || 'Could not send confirmation to the station.');
-    }
-  }
-
-  async function confirmDetection() {
+  async function waitForNextItem() {
     try {
-      setBusy(true);
-      setNotice('Confirmed. Sorting this batch now…');
-      await submitHardwareConfirmation(true);
-      if (!detectedItem?.hardwareData) {
-        setDetectionConfirmed(true);
-        setBusy(false);
-      } else {
-        setDisplayState('sorting');
+      const response = await fetch('http://127.0.0.1:8765/continue', { method: 'POST' });
+      if (!response.ok) {
+        const payload = await response.json();
+        throw new Error(payload.message);
       }
+      setDetectedItem(null);
+      setPlatformCleared(false);
+      setDisplayState('ready');
+      setNotice('Place the next item on the platform.');
     } catch (error) {
-      setBusy(false);
       setNotice(error.message);
     }
   }
 
-  function waitForNextItem() {
-    setDetectedItem(null);
-    setPlatformCleared(false);
-    setDetectionConfirmed(false);
-    setDisplayState('ready');
-    setNotice('');
-  }
-
-  async function rejectDetection() {
+  async function changeModel() {
+    setModelSwitching(true);
+    setModelError('');
     try {
-      await submitHardwareConfirmation(false);
-      setItems((currentItems) => currentItems.filter((item) => item.id !== detectedItem?.id));
-      setDetectedItem(null);
-      setDetectionConfirmed(false);
-      setDisplayState('waiting-empty');
-      setNotice('Incorrect detection rejected. The motors did not move. Remove all objects from the platform.');
+      const response = await fetch('http://127.0.0.1:8765/models/select', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: selectedModel }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || 'Model could not be changed.');
+      setActiveModel(data.active);
+      setNotice(`${modelChoices.find((choice) => choice.id === data.active)?.label || 'Model'} is ready.`);
     } catch (error) {
-      setNotice(error.message);
+      setModelError(error.message);
+    } finally {
+      setModelSwitching(false);
     }
   }
 
@@ -714,6 +710,7 @@ function BinDisplayDashboard({ onExit }) {
   }
 
   function clearSession() {
+    fetch('http://127.0.0.1:8765/continue', { method: 'POST' }).catch(() => {});
     if (gatewaySimulation) {
       fetch('http://127.0.0.1:8765/simulate', {
         method: 'POST',
@@ -725,15 +722,15 @@ function BinDisplayDashboard({ onExit }) {
     setClaim(null);
     setDetectedItem(null);
     setPlatformCleared(false);
-    setDetectionConfirmed(false);
     setDisplayState('ready');
     setNotice('');
   }
 
   async function finishSession(options = {}) {
     const testMode = options?.testMode === true;
-    const sessionItems = options?.itemsOverride || items;
-    const activeDeviceKey = testMode ? '' : deviceKey.trim();
+    const sessionItems = items;
+    const simulationOnly = sessionItems.some((item) => item.claimToken?.startsWith('trashquest-simulation:'));
+    const activeDeviceKey = testMode || simulationOnly ? '' : deviceKey.trim();
     if (sessionItems.length === 0) {
       setNotice('Add at least one waste item before generating a QR code.');
       return;
@@ -870,12 +867,27 @@ function BinDisplayDashboard({ onExit }) {
         <div className="ai-camera-heading">
           <div>
             <span><i /> AI camera</span>
-            <small>{gatewayOnline ? `${cameraStatus.fps ?? '—'} FPS` : 'Gateway offline'}</small>
+            <small>{gatewayOnline ? `${cameraStatus.fps ?? '—'} FPS · AI ${cameraStatus.inferenceFps ?? '—'} FPS` : 'Gateway offline'}</small>
           </div>
           <button type="button" onClick={() => setCameraVisible((visible) => !visible)}>
             {cameraVisible ? 'Hide' : 'Show camera'}
           </button>
         </div>
+        {cameraVisible && (
+          <div className="ai-model-control">
+            <label htmlFor="station-model">Detection model</label>
+            <div>
+              <select id="station-model" value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={!gatewayOnline || modelSwitching}>
+                {modelChoices.map((choice) => <option key={choice.id} value={choice.id} disabled={!choice.available}>{choice.label}{choice.available ? '' : ' (missing)'}</option>)}
+              </select>
+              <button type="button" onClick={changeModel} disabled={!gatewayOnline || modelSwitching || displayState !== 'ready' || !gatewayPlatformClear || selectedModel === activeModel}>
+                {modelSwitching ? 'Loading…' : 'Use model'}
+              </button>
+            </div>
+            <small>Active: {modelChoices.find((choice) => choice.id === activeModel)?.label || activeModel}. Clear the platform to switch.</small>
+            {modelError && <small className="ai-model-error">{modelError}</small>}
+          </div>
+        )}
         {cameraVisible && (
           <div className="ai-camera-feed">
             {gatewayOnline ? (
@@ -905,14 +917,14 @@ function BinDisplayDashboard({ onExit }) {
               <div className="bin-opening"><i /><i /><i /></div>
             </div>
             <p className="kiosk-kicker">Smart waste station</p>
-            <h1>{binFull ? 'Bin temporarily unavailable' : 'Place one waste type on the platform'}</h1>
-            <p>{binFull ? 'This bin is full and needs collection.' : 'The AI will count each visible object and sort the batch automatically.'}</p>
+            <h1>{binFull ? 'Bin temporarily unavailable' : 'Place paper or plastic bottles on the platform'}</h1>
+            <p>{binFull ? 'This bin is full and needs collection.' : 'Place one waste type at a time. The AI counts visible papers or bottles and sorts the batch automatically. Tin cans go one at a time. Paper: 5 points · Plastic: 10 points · Tin can: 15 points.'}</p>
             {!binFull && (
               <div className="plastic-crush-notice">
                 Please crush plastic bottles before placing them on the platform.
               </div>
             )}
-            {notice && <div className="kiosk-correction-notice">{notice}</div>}
+            {notice && <div className="kiosk-correction-notice" role="alert">{notice}</div>}
           </div>
         )}
 
@@ -921,7 +933,7 @@ function BinDisplayDashboard({ onExit }) {
             <div className="scanner-orb"><span>{detectedItem?.icon}</span><i /></div>
             <p className="kiosk-kicker">AI scanning</p>
             <h1>Analyzing the platform…</h1>
-            <p>Keep the objects still while type and quantity stabilize.</p>
+            <p>Keep the item still while its waste type is identified.</p>
             <div className="scan-progress"><i /></div>
           </div>
         )}
@@ -929,26 +941,19 @@ function BinDisplayDashboard({ onExit }) {
         {displayState === 'recognized' && detectedItem && (
           <div className="kiosk-message success-message">
             <div className={`result-icon result-${detectedItem.value.toLowerCase().replace(' ', '-')}`}>
-              <span>{detectedItem.icon}</span><i>{detectionConfirmed ? '✓' : '?'}</i>
+              <span>{detectedItem.icon}</span><i>✓</i>
             </div>
-            <p className="kiosk-kicker">Type and quantity detected</p>
+            <p className="kiosk-kicker">Item sorted</p>
             <h1>{detectedItem.itemCount} {detectedItem.itemCount === 1 ? detectedItem.label : `${detectedItem.label}s`} detected</h1>
             <p>Confidence: {Math.round(Number(detectedItem.confidence || 0) * 100)}%</p>
             <p>Points available: {detectedItem.pointsAvailable}</p>
-            {!detectionConfirmed ? (
-              <div className="classification-review">
-                <strong>Is this identification correct?</strong>
-                <div>
-                  <button type="button" className="review-wrong" onClick={rejectDetection} disabled={busy}><span>✕</span> No, incorrect</button>
-                  <button type="button" className="review-correct" onClick={confirmDetection} disabled={busy}><span>✓</span> Yes, correct</button>
-                </div>
-              </div>
-            ) : (
-              <div className="result-actions">
-                <button type="button" className="kiosk-primary" onClick={waitForNextItem}>Drop another item</button>
-                <button type="button" className="kiosk-secondary" onClick={finishSession}>I’m done — show QR</button>
-              </div>
-            )}
+            <strong>Are you done throwing waste?</strong>
+            <p>{totalItems} items thrown · {estimatedTotalPoints} points</p>
+            {notice && <p>{notice}</p>}
+            <div className="result-actions">
+              <button type="button" className="kiosk-primary" onClick={waitForNextItem} disabled={busy || !platformCleared}>No, not done - throw another item</button>
+              <button type="button" className="kiosk-secondary" onClick={() => finishSession()} disabled={busy}>Yes, done - show QR</button>
+            </div>
           </div>
         )}
 
@@ -957,7 +962,7 @@ function BinDisplayDashboard({ onExit }) {
             <div className="scanner-orb"><span>{detectedItem?.icon || '♻'}</span><i /></div>
             <p className="kiosk-kicker">{displayState === 'sorting' ? 'Sorting in progress' : 'Sorting successful'}</p>
             <h1>{displayState === 'sorting' ? 'Please wait…' : 'Creating your claim…'}</h1>
-            <p>{displayState === 'sorting' ? 'The station is moving one time for this entire batch.' : 'Points are recorded only after the ESP32 confirms success.'}</p>
+            <p>{displayState === 'sorting' ? 'The station is sorting this batch automatically.' : 'Points are recorded only after the ESP32 confirms success.'}</p>
           </div>
         )}
 
@@ -967,6 +972,8 @@ function BinDisplayDashboard({ onExit }) {
             <p className="kiosk-kicker">Batch cancelled</p>
             <h1>Clear the platform</h1>
             <p>{notice || 'Remove all objects. The station will rearm after the platform stays empty.'}</p>
+            <button type="button" className="kiosk-primary" onClick={waitForNextItem} disabled={busy}>Return to ready - keep my points</button>
+            {items.length > 0 && <button type="button" className="kiosk-secondary" onClick={() => finishSession()} disabled={busy}>Done - show QR for sorted items</button>}
           </div>
         )}
 
@@ -1029,14 +1036,14 @@ function BinDisplayDashboard({ onExit }) {
       <aside className="hardware-test-panel">
         <span>Simulation controls</span>
         <div>
-          {binWasteOptions.map((option, index) => (
+          {binWasteOptions.map((option) => (
             <button
               type="button"
               key={option.value}
               onClick={() => fetch('http://127.0.0.1:8765/simulate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ wasteType: option.value, itemCount: index === 0 ? 3 : 1, confidence: 0.9 }),
+                body: JSON.stringify({ wasteType: option.value, itemCount: 1, confidence: 0.9 }),
               }).catch(() => setNotice('Start the gateway with --simulate first.'))}
               disabled={!gatewaySimulation || displayState !== 'ready' || binFull}
             >

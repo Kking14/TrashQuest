@@ -7,13 +7,13 @@ The web platform includes interfaces for residents, barangay administrators, and
 ## How it works
 
 1. A resident places one waste type on the platform (plastic bottles should be crushed first).
-2. YOLO filters individual boxes to the configured platform ROI and stabilizes their type and count.
-3. The resident confirms the detected batch and the ESP32 performs one sorting movement.
+2. YOLO identifies paper and plastic bottles inside the platform ROI; the inductive sensor identifies tin cans.
+3. The ESP32 automatically sorts the detected item without resident confirmation. Each successful cycle adds the stable AI batch count to the session; inductive tin cans count one at a time.
 4. Only a matching successful `sorted` acknowledgement creates a claim and its QR/session code.
 5. The resident scans the QR code or enters the code in the resident portal.
 6. Points and eligible daily or weekly quest progress are updated.
 
-The station uses a camera running the existing YOLO model for explicit waste classification and per-box counting, an inductive sensor for tin-can confirmation, and an ultrasonic sensor dedicated to bin fullness.
+The station uses a camera running the existing YOLO model for explicit waste classification and waste-type classification, an inductive sensor for tin-can detection, and an ultrasonic sensor dedicated to bin fullness.
 
 ## Main interfaces
 
@@ -26,7 +26,7 @@ The station uses a camera running the existing YOLO model for explicit waste cla
 - Separate first name, middle initial, and last name registration fields
 - Password confirmation, strength feedback, secure hashing, and JWT authentication
 - Session-based QR and manual-code claims
-- AI-counted plastic bottle, tin can, and paper batches with item-count quest targets
+- Sequential plastic bottle, tin can, and paper disposals with item-count quest targets
 - Daily and weekly quests with scheduling and expiration handling
 - Completed and expired quest history
 - Ultrasonic-sensor full/available bin indicators
@@ -154,10 +154,27 @@ to the serial port.
    from **Test mode** to **Hardware connected** when the camera, ESP32, and
    gateway are ready.
 
+To compare models on the running station, open **AI camera** in the bin display,
+choose a model under **Detection model**, and press **Use model**. The station
+switches only while idle with an empty platform. It loads and warms the new
+model before replacing the active one; if loading fails, the previous model
+remains active. The menu includes the configured PyTorch model, the bundled
+YOLOv8s ONNX/NCNN exports, and the YOLO26n PyTorch/ONNX/NCNN exports. The
+selected model lasts until the gateway restarts, when it returns to
+`TQ_MODEL_PATH`. Watch **AI FPS** in the
+camera panel and test the same objects under each model.
+
 The gateway publishes confirmed sorted items at `http://127.0.0.1:8765/events`.
 It creates each disposal claim using a stable detection ID, so retrying a failed
 HTTP response cannot create duplicate points. The kiosk uses those claim tokens
 to create the existing multi-item QR session.
+
+Mixed paper/plastic detections, or inductive metal together with camera waste,
+show a one-waste-type notice and block sorting until both sensors remain clear.
+Metal batches wait for a fresh camera frame before sorting. Upload the updated
+ESP32 sketch and restart the gateway to enable continuous inductive-state reports
+and the firmware guard against metal during a paper/plastic sort. A conflict
+detected after motion starts requests a stop; it cannot undo completed motion.
 
 Plastic is explicitly recognized by a configured YOLO class. The Sharp sensor
 is no longer a classification authority. The GPIO 26 inductive sensor directly
@@ -165,7 +182,7 @@ classifies a single Tin Can without requiring an AI detection, while the
 ultrasonic sensor is dedicated to fullness.
 After a Tin Can is sorted, GPIO 26 must remain inactive for 350 ms; the ESP32
 then reports the platform empty and enables the kiosk's next-batch button.
-Rewards and quest progress use stabilized AI bounding-box counts. Optional
+Rewards and quest progress use the number of successfully sorted items in the resident session. Optional
 estimated grams are informational metadata only and never determine points.
 
 ### Camera and reward configuration
@@ -179,8 +196,7 @@ centres are outside the ROI are ignored. Stable batches containing more than
 one accepted waste type are rejected.
 
 Copy `Backend/.env.example` to the untracked `Backend/.env`. The
-`TQ_POINTS_PER_ITEM_*` defaults are configurable placeholders, not approved
-barangay values. Configure them only in `Backend/.env`; the authenticated
+`TQ_POINTS_PER_ITEM_*` defaults are Paper = 5, Plastic = 10, and Tin Can = 15 points. Configure overrides only in `Backend/.env`; the authenticated
 gateway loads that authoritative rate table from the backend.
 
 ### Ultrasonic full-bin reporting
@@ -248,3 +264,32 @@ processes recorded by that launch.
 ## Repository
 
 Maintained by [Kking14](https://github.com/Kking14).
+
+### Sequential disposal flow
+
+Place one waste type on the platform at a time. Paper and plastic bottles are
+counted from separate visible AI boxes. Tin cans use the inductive sensor and
+count one at a time. The station identifies and sorts the batch
+without a confirmation button, then asks **Are you done throwing waste?**
+Choose **Not done** after the platform clears to add another item to the same
+session. Choose **Done** to generate one QR and session code for all sorted
+items. Two papers in one batch plus one paper in the next batch show three
+papers and earn 15 points. Two papers earn 10 points; one paper, one plastic bottle, and one tin can
+earn 30 points. Failed motor operations do not add items or award points.
+The station pauses acceptance while the done question or QR is displayed.
+
+The ESP32 serial port defaults to **COM3** in `.env.station.example` and the
+gateway. The existing firmware prepare/sort protocol supports automatic sorting
+without a firmware upload. This checkout does not include the trained `best.pt`
+model or live `.env` files; supply the model and configure `.env.station` and
+`Backend/.env` before running the physical station. Old reward overrides in
+`Backend/.env` must be updated to 5/10/15 to match these defaults.
+
+### Independent camera preview
+
+Camera capture and MJPEG preview run separately from AI inference. The AI uses
+only the latest captured frame, preventing a backlog when inference is slower.
+`TQ_PREVIEW_FPS=20` sets the preview target; achieved FPS depends on the camera
+and computer. The display reports preview FPS and AI FPS separately. Detection
+boxes update at AI speed and disappear when older than one second. Counting,
+classification thresholds, and sorting still depend on AI results.

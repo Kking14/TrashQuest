@@ -79,6 +79,9 @@ unsigned long lastSerialByteAt = 0;
 
 // Incremental stepper state.
 bool stepperBusy = false;
+bool reportedMetalActive = false;
+bool hasMetalStateReport = false;
+unsigned long lastMetalStateReportAt = 0;
 bool stepPulseHigh = false;
 int remainingSteps = 0;
 unsigned long nextStepToggleUs = 0;
@@ -314,6 +317,12 @@ void processCommand(const char *line) {
     return;
   }
   if (action == "sort" && controllerState == WAITING_FOR_CONFIRMATION) {
+    if (activeWasteType != "Tin Can" && digitalRead(inductivePin) == LOW) {
+      safeMotorStop();
+      setState(WAITING_FOR_PLATFORM_EMPTY);
+      sendEvent("mixed_waste_detected", false, "Metal and camera waste detected together");
+      return;
+    }
     if (binFull) {
       sendEvent("sorted", false, "Bin became full before sorting");
       setState(WAITING_FOR_PLATFORM_EMPTY);
@@ -353,6 +362,23 @@ void readSerialCommands() {
 
 void updateInductiveSensor() {
   bool metalActive = digitalRead(inductivePin) == LOW;
+  // Report presence independently of the transaction state, including while sorting.
+  if (!hasMetalStateReport || metalActive != reportedMetalActive || millis() - lastMetalStateReportAt >= 1000) {
+    JsonDocument message;
+    message["event"] = "inductive_state";
+    message["active"] = metalActive;
+    serializeJson(message, Serial);
+    Serial.println();
+    reportedMetalActive = metalActive;
+    hasMetalStateReport = true;
+    lastMetalStateReportAt = millis();
+  }
+  if (metalActive && controllerState == SORTING && activeWasteType != "Tin Can") {
+    safeMotorStop();
+    setState(WAITING_FOR_PLATFORM_EMPTY);
+    sendEvent("mixed_waste_detected", false, "Metal and camera waste detected together");
+    return;
+  }
 
   // Metal bypasses camera detection, so sensor release is also the reliable
   // platform-empty signal that rearms the kiosk after sorting.
@@ -469,11 +495,11 @@ void setup() {
 }
 
 void loop() {
+  updateInductiveSensor();
   readSerialCommands();
   updateServo();
   updateStepper();
   updateFullness();
-  updateInductiveSensor();
   if (controllerState == SORTING) updateSorting();
   updateTimeoutsAndRecovery();
 }
