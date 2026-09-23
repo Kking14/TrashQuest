@@ -23,6 +23,30 @@ const updateReward = async (rewardID, updateData) => {
     }
     return reward;
 };
+
+const getRewardImage = async (rewardID) => Reward.findById(rewardID)
+    .select('+imageData imageContentType');
+
+const setRewardImage = async (rewardID, imageData) => Reward.findByIdAndUpdate(
+    rewardID,
+    {
+        $set: {
+            imageData,
+            imageContentType: 'image/jpeg',
+            imageUpdatedAt: new Date(),
+        },
+    },
+    { new: true, runValidators: true }
+).select('-imageData');
+
+const removeRewardImage = async (rewardID) => Reward.findByIdAndUpdate(
+    rewardID,
+    {
+        $unset: { imageData: 1 },
+        $set: { imageContentType: null, imageUpdatedAt: null },
+    },
+    { new: true }
+).select('-imageData');
  
 // Wrapped in a transaction so a resident's points and the reward's stock can
 // never desync (e.g. two residents redeeming the last item at the same
@@ -79,4 +103,4 @@ const markRedemptionClaimed = async (rewardID, redemptionID) => {
     return reward;
 };
  
-export { createReward, getAllRewards, updateReward, redeemReward, markRedemptionClaimed };
+export { createReward, getAllRewards, updateReward, getRewardImage, setRewardImage, removeRewardImage, redeemReward, markRedemptionClaimed };

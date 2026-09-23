@@ -33,6 +33,9 @@ app.use("/api/quests", questRoutes);
 app.use("/api/rewards", rewardRoutes);
 
 app.use((error, req, res, next) => {
+  if (error.status === 413) {
+    return res.status(413).json({ success: false, message: 'Reward photo is too large. Choose a smaller image.' });
+  }
   if (error instanceof SyntaxError && error.status === 400 && "body" in error) {
     return res.status(400).json({ success: false, message: "Invalid JSON request" });
   }
