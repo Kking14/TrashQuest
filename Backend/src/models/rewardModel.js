@@ -10,6 +10,11 @@ const redemptionSchema = new mongoose.Schema({
         type: Number,
         required: true,
     },
+    pickupCode: {
+        type: String,
+        uppercase: true,
+        trim: true,
+    },
     status: {
         type: String,
         enum: ['pending', 'claimed'],

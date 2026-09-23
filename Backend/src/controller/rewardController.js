@@ -6,7 +6,9 @@ import {
     setRewardImage,
     removeRewardImage,
     redeemReward,
-    markRedemptionClaimed,
+    listMyRedemptions,
+    lookupRedemptionByCode,
+    claimRedemptionByCode,
 } from '../services/rewardService.js';
 import { validateRewardImage } from '../utils/rewardImage.js';
 
@@ -80,13 +82,31 @@ const redeem = async (req, res) => {
     }
 };
 
-const claimRedemption = async (req, res) => {
+const myRedemptions = async (req, res) => {
     try {
-        const reward = await markRedemptionClaimed(req.params.id, req.params.redemptionId);
-        res.status(200).json({ success: true, message: 'Redemption marked as claimed', data: reward });
+        const redemptions = await listMyRedemptions(req.user.id);
+        res.status(200).json({ success: true, data: redemptions });
     } catch (error) {
         res.status(400).json({ success: false, message: error.message });
     }
 };
 
-export { addReward, listRewards, editReward, serveRewardImage, uploadRewardImage, deleteRewardImage, redeem, claimRedemption };
+const findRedemption = async (req, res) => {
+    try {
+        const redemption = await lookupRedemptionByCode(req.body?.pickupCode);
+        res.status(200).json({ success: true, data: redemption });
+    } catch (error) {
+        res.status(400).json({ success: false, message: error.message });
+    }
+};
+
+const claimRedemption = async (req, res) => {
+    try {
+        const redemption = await claimRedemptionByCode(req.body?.pickupCode);
+        res.status(200).json({ success: true, message: 'Reward handover confirmed', data: redemption });
+    } catch (error) {
+        res.status(400).json({ success: false, message: error.message });
+    }
+};
+
+export { addReward, listRewards, editReward, serveRewardImage, uploadRewardImage, deleteRewardImage, redeem, myRedemptions, findRedemption, claimRedemption };
