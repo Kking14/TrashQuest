@@ -5,6 +5,7 @@ import binRoutes from "./routes/binRoutes.js";
 import disposalRoutes from "./routes/disposalRoutes.js";
 import questRoutes from "./routes/questRoutes.js";
 import rewardRoutes from "./routes/rewardRoutes.js";
+import overviewRoutes from "./routes/overviewRoutes.js";
 import { connectDB } from "./config/db.js";
 import dotenv from "dotenv";
 import helmet from "helmet";
@@ -31,6 +32,7 @@ app.use("/api/bins", binRoutes);
 app.use("/api/disposals", disposalRoutes);
 app.use("/api/quests", questRoutes);
 app.use("/api/rewards", rewardRoutes);
+app.use("/api/overview", overviewRoutes);
 
 app.use((error, req, res, next) => {
   if (error.status === 413) {

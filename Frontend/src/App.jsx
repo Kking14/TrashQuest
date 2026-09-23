@@ -4,6 +4,34 @@ import QrScanner from 'qr-scanner';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 const BIN_DASHBOARD_PASSWORD = import.meta.env.VITE_BIN_DASHBOARD_PASSWORD || 'admin123';
+const KIOSK_IDLE_DELAY_MS = 30000;
+const KIOSK_SLIDE_DURATION_MS = 5500;
+const kioskIdleSlides = [
+  {
+    eyebrow: 'Why TrashQuest exists',
+    icon: '♻',
+    title: 'A cleaner barangay starts here.',
+    description: 'TrashQuest helps sort recyclable waste and rewards residents for taking part.',
+  },
+  {
+    eyebrow: 'Step 1 · Place waste',
+    icon: '📄',
+    title: 'One waste type at a time.',
+    description: 'Place paper or crushed plastic bottles on the platform. Tin cans go one at a time.',
+  },
+  {
+    eyebrow: 'Step 2 · Let it sort',
+    icon: '↘',
+    title: 'Wait while the station sorts.',
+    description: 'Keep your hands clear. The station counts and sorts the items before making a claim.',
+  },
+  {
+    eyebrow: 'Step 3 · Claim points',
+    icon: '◇',
+    title: 'Scan the QR to earn points.',
+    description: 'Use the resident website on your phone to scan the code shown here after sorting.',
+  },
+];
 const wasteTypes = ['Paper', 'Plastic', 'Tin Can'];
 const binWasteOptions = [
   { label: 'Plastic bottle', value: 'Plastic', icon: '🥤' },
@@ -125,9 +153,11 @@ function App() {
     bins: [],
     disposals: [],
     rewards: [],
+    redemptions: [],
     quests: [],
     users: [],
-    logs: [],
+    overview: null,
+    binCount: null,
   });
 
   const token = session?.token;
@@ -136,8 +166,7 @@ function App() {
   const totals = useMemo(() => {
     const disposalPoints = data.disposals.reduce((sum, disposal) => sum + (disposal.pointsAwarded || 0), 0);
     const totalItems = data.disposals.reduce((sum, disposal) => sum + (disposal.itemCount || 0), 0);
-    const collectionCount = data.bins.filter((bin) => bin.status === 'needs_collection').length;
-    return { disposalPoints, totalItems, collectionCount };
+    return { disposalPoints, totalItems };
   }, [data]);
 
   useEffect(() => {
@@ -171,7 +200,11 @@ function App() {
           }
           previousBinFullness.current.set(bin._id, { isFull, changeMarker });
         }
-        setData((current) => ({ ...current, bins }));
+        setData((current) => ({
+          ...current,
+          bins,
+          binCount: bins.filter((bin) => bin.isFull || bin.status === 'needs_collection').length,
+        }));
       } catch {
         // The normal API error state remains available on manual refresh.
       }
@@ -192,15 +225,17 @@ function App() {
       if (stopped || inFlight || document.visibilityState === 'hidden') return;
       inFlight = true;
       try {
-        const [quests, rewards] = await Promise.allSettled([
+        const [quests, rewards, redemptions] = await Promise.allSettled([
           apiRequest('/api/quests/available', { token }),
           apiRequest('/api/rewards', { token }),
+          apiRequest('/api/rewards/my-redemptions', { token }),
         ]);
-        if (!stopped && (quests.status === 'fulfilled' || rewards.status === 'fulfilled')) {
+        if (!stopped && (quests.status === 'fulfilled' || rewards.status === 'fulfilled' || redemptions.status === 'fulfilled')) {
           setData((current) => ({
             ...current,
             quests: quests.status === 'fulfilled' ? quests.value.data || [] : current.quests,
             rewards: rewards.status === 'fulfilled' ? rewards.value.data || [] : current.rewards,
+            redemptions: redemptions.status === 'fulfilled' ? redemptions.value.data || [] : current.redemptions,
           }));
         }
       } catch {
@@ -210,7 +245,7 @@ function App() {
       }
     }
 
-    const timer = window.setInterval(refreshResidentCatalog, 10000);
+    const timer = window.setInterval(refreshResidentCatalog, 20000);
     window.addEventListener('focus', refreshResidentCatalog);
     document.addEventListener('visibilitychange', refreshResidentCatalog);
     return () => {
@@ -245,24 +280,29 @@ function App() {
     const requests = [
       ['profile', apiRequest('/api/auth/me', { token })],
       ['bins', apiRequest('/api/bins', { token })],
-      ['disposals', apiRequest('/api/disposals/me', { token })],
       ['rewards', apiRequest('/api/rewards', { token })],
       ['quests', apiRequest(isAdmin ? '/api/quests' : '/api/quests/available', { token })],
     ];
 
     if (isAdmin) {
       requests.push(['users', apiRequest('/api/users?limit=500&sortBy=name&sortOrder=asc', { token })]);
-      requests.push(['logs', apiRequest('/api/disposals?limit=500', { token })]);
+      requests.push(['overview', apiRequest('/api/overview', { token })]);
+    } else {
+      requests.push(['disposals', apiRequest('/api/disposals/me', { token })]);
+      requests.push(['redemptions', apiRequest('/api/rewards/my-redemptions', { token })]);
     }
 
     const results = await Promise.allSettled(requests.map(([, request]) => request));
-    const nextData = { profile: null, bins: [], disposals: [], rewards: [], quests: [], users: [], logs: [] };
+    const nextData = { profile: null, bins: [], disposals: [], rewards: [], redemptions: [], quests: [], users: [], overview: null, binCount: null };
     results.forEach((result, index) => {
       if (result.status === 'fulfilled') {
         const key = requests[index][0];
-        nextData[key] = key === 'profile' ? result.value.data || null : result.value.data || [];
+        nextData[key] = key === 'profile' || key === 'overview' ? result.value.data || null : result.value.data || [];
       }
     });
+    if (results[requests.findIndex(([key]) => key === 'bins')]?.status === 'fulfilled') {
+      nextData.binCount = nextData.bins.filter((bin) => bin.isFull || bin.status === 'needs_collection').length;
+    }
     if (nextData.profile) {
       const updatedSession = { ...session, ...nextData.profile, token };
       localStorage.setItem('trashquest_session', JSON.stringify(updatedSession));
@@ -296,7 +336,7 @@ function App() {
     sessionStorage.removeItem('trashquest_view');
     setSession(null);
     setView('scan');
-    setData({ profile: null, bins: [], disposals: [], rewards: [], quests: [], users: [], logs: [] });
+    setData({ profile: null, bins: [], disposals: [], rewards: [], redemptions: [], quests: [], users: [], overview: null, binCount: null });
   }
 
   async function runAction(action, successMessage) {
@@ -568,8 +608,13 @@ function BinDisplayDashboard({ onExit }) {
   const [busy, setBusy] = useState(false);
   const [claim, setClaim] = useState(null);
   const [displayState, setDisplayState] = useState('ready');
+  const [idleVisible, setIdleVisible] = useState(false);
+  const [idlePreview, setIdlePreview] = useState(false);
+  const [idleStep, setIdleStep] = useState(0);
+  const [lastKioskInteraction, setLastKioskInteraction] = useState(0);
   const [detectedItem, setDetectedItem] = useState(null);
   const [gatewayOnline, setGatewayOnline] = useState(false);
+  const [gatewayScanning, setGatewayScanning] = useState(false);
   const [gatewaySimulation, setGatewaySimulation] = useState(false);
   const [binFull, setBinFull] = useState(false);
   const [platformCleared, setPlatformCleared] = useState(false);
@@ -592,6 +637,37 @@ function BinDisplayDashboard({ onExit }) {
       .reduce((sum, item) => sum + (item.itemCount || 1), 0),
   })).filter((item) => item.count > 0);
   const estimatedTotalPoints = items.reduce((sum, item) => sum + (item.pointsAvailable || 0), 0);
+  const canPreviewIdle = isUnlocked && displayState === 'ready' && items.length === 0
+    && !busy && !detectedItem && !binFull && !gatewayScanning;
+  const canShowIdle = canPreviewIdle && !notice
+    && ((gatewayOnline && (gatewaySimulation || gatewayPlatformClear)) || (!gatewayOnline && !deviceKey));
+  const showIdleScreen = canPreviewIdle && (idlePreview || (idleVisible && canShowIdle));
+
+  useEffect(() => {
+    if (!canShowIdle) {
+      setIdleVisible(false);
+      return;
+    }
+    const timer = window.setTimeout(() => { setIdleStep(0); setIdleVisible(true); }, KIOSK_IDLE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [canShowIdle, lastKioskInteraction]);
+
+  useEffect(() => {
+    if (!showIdleScreen) return;
+    setIdleStep(0);
+    const timer = window.setInterval(() => setIdleStep((step) => (step + 1) % kioskIdleSlides.length), KIOSK_SLIDE_DURATION_MS);
+    return () => window.clearInterval(timer);
+  }, [showIdleScreen]);
+
+  useEffect(() => {
+    if (!canPreviewIdle) setIdlePreview(false);
+  }, [canPreviewIdle]);
+
+  function wakeKiosk() {
+    setIdleVisible(false);
+    setIdlePreview(false);
+    setLastKioskInteraction((count) => count + 1);
+  }
 
   useEffect(() => () => clearTimeout(detectionTimer.current), []);
 
@@ -616,6 +692,7 @@ function BinDisplayDashboard({ onExit }) {
         const status = await health.json();
         if (!stopped) {
           setGatewayOnline(Boolean(status.online && status.serial && status.camera));
+          setGatewayScanning(Boolean(status.scanning));
           setGatewaySimulation(Boolean(status.simulation));
           setBinFull(Boolean(status.binFull));
           setGatewayPlatformClear(Boolean(status.platformClear));
@@ -680,7 +757,10 @@ function BinDisplayDashboard({ onExit }) {
           }
         }
       } catch {
-        if (!stopped) setGatewayOnline(false);
+        if (!stopped) {
+          setGatewayOnline(false);
+          setGatewayScanning(false);
+        }
       }
     }
     pollGateway();
@@ -785,6 +865,7 @@ function BinDisplayDashboard({ onExit }) {
     setDeviceKey(normalizedDeviceKey);
     clearSession();
     gatewaySequence.current = null;
+    setLastKioskInteraction((count) => count + 1);
     setIsUnlocked(true);
   }
 
@@ -961,11 +1042,14 @@ function BinDisplayDashboard({ onExit }) {
   }
 
   return (
-    <main className={`bin-display-shell kiosk-state-${displayState}`}>
+    <main className={`bin-display-shell kiosk-state-${displayState}`} onPointerDownCapture={wakeKiosk} onKeyDownCapture={wakeKiosk}>
       <header className="kiosk-header">
         <div className="kiosk-brand"><span>TQ</span><strong>TrashQuest</strong></div>
         <div className="station-status"><i /> {gatewayOnline ? 'Hardware connected' : 'Test mode'}</div>
-        <button type="button" className="kiosk-exit" onClick={exitDisplay}>Exit display</button>
+        <div className="kiosk-header-actions">
+          {(gatewaySimulation || !gatewayOnline) && canPreviewIdle && <button type="button" className="kiosk-preview" onClick={() => { setIdleStep(0); setIdlePreview(true); }}>Preview slideshow</button>}
+          <button type="button" className="kiosk-exit" onClick={exitDisplay}>Exit display</button>
+        </div>
       </header>
 
       <aside className={`ai-camera-panel ${cameraVisible ? 'is-open' : 'is-closed'}`}>
@@ -1158,6 +1242,23 @@ function BinDisplayDashboard({ onExit }) {
         </div>
         <small>{gatewaySimulation ? 'No hardware is being controlled.' : 'Start station_gateway.py --simulate to enable.'}</small>
       </aside>
+
+      {showIdleScreen && (
+        <section className="kiosk-idle-screen" aria-label="How TrashQuest works">
+          <div className="kiosk-idle-content">
+            <div className="kiosk-idle-emblem" aria-hidden="true"><span>{kioskIdleSlides[idleStep].icon}</span></div>
+            <div className="kiosk-idle-slide" key={idleStep}>
+              <p className="kiosk-idle-kicker">{kioskIdleSlides[idleStep].eyebrow}</p>
+              <h1>{kioskIdleSlides[idleStep].title}</h1>
+              <p className="kiosk-idle-purpose">{kioskIdleSlides[idleStep].description}</p>
+            </div>
+            <div className="kiosk-slide-progress" aria-label={`Slide ${idleStep + 1} of ${kioskIdleSlides.length}`}>
+              {kioskIdleSlides.map((slide, index) => <span key={slide.eyebrow} className={index === idleStep ? 'active' : ''} />)}
+            </div>
+            <button type="button" className="kiosk-idle-start" onClick={wakeKiosk}><span>Tap anywhere to begin</span></button>
+          </div>
+        </section>
+      )}
     </main>
   );
 
@@ -1363,7 +1464,7 @@ function ResidentApp({ data, loading, logout, notice, refreshData, runAction, se
       {view === 'scan' && <ResidentScan token={token} runAction={runAction} onViewPoints={() => navigateTo('wallet')} />}
       {view === 'wallet' && <ResidentWallet data={data} loading={loading} refreshData={refreshData} session={session} totals={totals} onScan={() => navigateTo('scan')} />}
       {view === 'quests' && <QuestView quests={data.quests} session={session} onScan={() => navigateTo('scan')} onRefresh={refreshData} loading={loading} />}
-      {view === 'rewards' && <RewardView rewards={data.rewards} points={data.profile?.points || 0} token={token} runAction={runAction} onScan={() => navigateTo('scan')} onRefresh={refreshData} loading={loading} />}
+      {view === 'rewards' && <RewardView rewards={data.rewards} redemptions={data.redemptions} points={data.profile?.points || 0} token={token} runAction={runAction} onScan={() => navigateTo('scan')} onRefresh={refreshData} loading={loading} />}
 
       <nav className="bottom-tabs" aria-label="Resident navigation">
         {tabs.map((tab) => (
@@ -1690,7 +1791,7 @@ function AdminApp({ data, loading, logout, notice, refreshData, runAction, sessi
             <button type="button" onClick={() => setView('admin-bins')}>View bins</button>
           </section>
         )}
-        {view === 'admin-overview' && <AdminOverview data={data} totals={totals} />}
+        {view === 'admin-overview' && <AdminOverview data={data} token={token} loading={loading} />}
         {view === 'admin-bins' && <AdminBinTools data={data} token={token} runAction={runAction} loading={loading} />}
         {view === 'admin-quests' && <AdminQuestTools quests={data.quests} token={token} runAction={runAction} loading={loading} />}
         {view === 'admin-rewards' && <AdminRewardTools rewards={data.rewards} token={token} runAction={runAction} loading={loading} />}
@@ -1700,28 +1801,54 @@ function AdminApp({ data, loading, logout, notice, refreshData, runAction, sessi
   );
 }
 
-function AdminOverview({ data, totals }) {
+function AdminOverview({ data, token, loading }) {
   const [selectedUser, setSelectedUser] = useState(null);
-  const userRows = data.users.map((user) => {
-    const history = data.logs.filter((log) => {
-      const logUserId = log.user?._id || log.user;
-      return logUserId?.toString() === user._id?.toString();
-    });
-    return {
-      ...user,
-      history,
-      itemCount: history.reduce((sum, log) => sum + (log.itemCount || 1), 0),
-      earnedPoints: history.reduce((sum, log) => sum + (log.pointsAwarded || 0), 0),
-    };
-  });
+  const [page, setPage] = useState(1);
+  const [pagedOverview, setPagedOverview] = useState(null);
+  const [pageLoading, setPageLoading] = useState(false);
+  const [pageError, setPageError] = useState('');
+
+  useEffect(() => {
+    setPage(1);
+    setPagedOverview(null);
+  }, [data.overview]);
+
+  useEffect(() => {
+    if (page === 1) return;
+    let cancelled = false;
+    setPagedOverview(null);
+    setPageLoading(true);
+    setPageError('');
+    apiRequest(`/api/overview?page=${page}`, { token })
+      .then((response) => { if (!cancelled) setPagedOverview(response.data); })
+      .catch((error) => { if (!cancelled) setPageError(error.message); })
+      .finally(() => { if (!cancelled) setPageLoading(false); });
+    return () => { cancelled = true; };
+  }, [page, token]);
+
+  async function openHistory(user) {
+    setSelectedUser({ ...user, history: null, error: '' });
+    try {
+      const response = await apiRequest(`/api/disposals?userID=${encodeURIComponent(user._id)}&limit=1000`, { token });
+      setSelectedUser((current) => current?._id === user._id ? { ...current, history: response.data || [] } : current);
+    } catch (error) {
+      setSelectedUser((current) => current?._id === user._id ? { ...current, error: error.message } : current);
+    }
+  }
+
+  const overview = page === 1 ? data.overview : pagedOverview;
+  if (!overview) {
+    return <section className="panel"><p>{loading || pageLoading ? 'Loading overview…' : pageError || 'Overview unavailable. Use Refresh to try again.'}</p>{page > 1 && !pageLoading && <button type="button" className="secondary-button small" onClick={() => setPage(1)}>Back to first page</button>}</section>;
+  }
+  const { metrics, residents, pagination } = overview;
 
   return (
     <div className="view-stack">
       <section className="metric-grid">
-        <Metric label="Resident points" value={totals.disposalPoints} />
-        <Metric label="Items recorded" value={totals.totalItems} />
-        <Metric label="Current quests" value={data.quests.filter((quest) => quest.status !== 'closed' && new Date(quest.expiryDate) >= new Date()).length} />
-        <Metric label="Bins needing collection" value={totals.collectionCount} tone="warning" />
+        <Metric label="Resident point balance" value={metrics.residentPointBalance.toLocaleString()} />
+        <Metric label="Items recorded" value={metrics.itemsRecorded.toLocaleString()} />
+        <Metric label="Current quests" value={metrics.currentQuests.toLocaleString()} />
+        <Metric label="Bins needing collection" value={data.binCount ?? metrics.binsNeedingCollection} tone="warning" />
       </section>
       <section className="panel">
         <div className="section-heading">
@@ -1734,23 +1861,35 @@ function AdminOverview({ data, totals }) {
           <table>
             <thead><tr><th>Resident</th><th>Disposals</th><th>Waste</th><th>Points earned</th><th>Last activity</th></tr></thead>
             <tbody>
-              {userRows.map((user) => (
-                <tr className="clickable-row" key={user._id} onClick={() => setSelectedUser(user)} tabIndex="0">
+              {residents.map((user) => (
+                <tr className="clickable-row" key={user._id} onClick={() => openHistory(user)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openHistory(user); } }} tabIndex="0">
                   <td><strong>{user.name}</strong><span className="cell-subtitle">{user.email}</span></td>
-                  <td>{user.history.length}</td>
+                  <td>{user.disposals}</td>
                   <td>{user.itemCount} items</td>
                   <td>{user.earnedPoints}</td>
-                  <td>{user.history[0] ? formatDate(user.history[0].createdAt) : 'No activity'}</td>
+                  <td>{user.lastActivity ? formatDate(user.lastActivity) : 'No activity'}</td>
                 </tr>
               ))}
-              {userRows.length === 0 && <TableEmpty colSpan={5} text="No residents found." />}
+              {residents.length === 0 && <TableEmpty colSpan={5} text="No residents found." />}
             </tbody>
           </table>
         </div>
+        {pagination.pages > 1 && (
+          <div className="pagination">
+            <button type="button" className="secondary-button small" disabled={pagination.page <= 1} onClick={() => setPage(pagination.page - 1)}>Previous</button>
+            <span>Page {pagination.page} of {pagination.pages}</span>
+            <button type="button" className="secondary-button small" disabled={pagination.page >= pagination.pages} onClick={() => setPage(pagination.page + 1)}>Next</button>
+          </div>
+        )}
       </section>
       {selectedUser && (
         <Modal title={`${selectedUser.name}'s disposal history`} eyebrow={selectedUser.email} onClose={() => setSelectedUser(null)} wide>
-          <DisposalTable disposals={selectedUser.history} />
+          {selectedUser.error ? <p className="form-error">{selectedUser.error}</p> : selectedUser.history === null ? <p>Loading disposal history…</p> : (
+            <>
+              {selectedUser.disposals > selectedUser.history.length && <p>Showing the most recent {selectedUser.history.length} of {selectedUser.disposals} disposal records.</p>}
+              <DisposalTable disposals={selectedUser.history} />
+            </>
+          )}
         </Modal>
       )}
     </div>
@@ -2038,7 +2177,7 @@ function AdminQuestTools({ quests, token, runAction, loading }) {
       </div>
       <div className="content-tabs" role="tablist" aria-label="Quest views">
         <button type="button" role="tab" aria-selected={questTab === 'current'} className={questTab === 'current' ? 'active' : ''} onClick={() => setQuestTab('current')}>
-          Current <span>{currentQuests.length}</span>
+          Open &amp; scheduled <span>{currentQuests.length}</span>
         </button>
         <button type="button" role="tab" aria-selected={questTab === 'history'} className={questTab === 'history' ? 'active' : ''} onClick={() => setQuestTab('history')}>
           History <span>{historicalQuests.length}</span>
@@ -2355,7 +2494,7 @@ function QuestView({ quests, session, admin = false, history = false, onEdit, on
       <div className="section-heading">
         <div>
           <p className="eyebrow">Community goals</p>
-          <h3>{admin ? (history ? 'Quest history' : 'Current quests') : 'Available quests'}</h3>
+          <h3>{admin ? (history ? 'Quest history' : 'Open and scheduled quests') : 'Available quests'}</h3>
         </div>
         {!admin && <button type="button" className="secondary-button small" onClick={onRefresh} disabled={loading}>Refresh</button>}
       </div>
@@ -2460,11 +2599,25 @@ function QuestView({ quests, session, admin = false, history = false, onEdit, on
   );
 }
 
-function RewardView({ rewards, points, token, runAction, onScan, onRefresh, loading }) {
+function RewardView({ rewards, redemptions, points, token, runAction, onScan, onRefresh, loading }) {
   const [selectedReward, setSelectedReward] = useState(null);
+  const [newRedemption, setNewRedemption] = useState(null);
+  const [rewardTab, setRewardTab] = useState('browse');
+  const [catalogSearch, setCatalogSearch] = useState('');
+  const [redeemableOnly, setRedeemableOnly] = useState(false);
   const [verifiedPoints, setVerifiedPoints] = useState(points);
   const [checkingBalance, setCheckingBalance] = useState(false);
   const canAffordSelected = selectedReward && verifiedPoints >= selectedReward.pointsCost;
+  const pendingRedemptions = redemptions.filter((redemption) => redemption.status === 'pending');
+  const collectedRedemptions = redemptions.filter((redemption) => redemption.status === 'claimed');
+  const visibleRewards = useMemo(() => {
+    const query = catalogSearch.trim().toLowerCase();
+    return rewards.filter((reward) => {
+      if (query && !`${reward.name} ${reward.description || ''}`.toLowerCase().includes(query)) return false;
+      if (redeemableOnly) return reward.status === 'active' && reward.stock > 0 && points >= reward.pointsCost;
+      return true;
+    });
+  }, [rewards, catalogSearch, redeemableOnly, points]);
 
   async function openRewardConfirmation(reward) {
     setCheckingBalance(true);
@@ -2488,6 +2641,8 @@ function RewardView({ rewards, points, token, runAction, onScan, onRefresh, load
     );
     if (result) {
       setSelectedReward(null);
+      setNewRedemption({ ...result.data, rewardName: selectedReward.name });
+      setRewardTab('pickups');
     } else {
       try {
         const profile = await apiRequest('/api/auth/me', { token });
@@ -2502,8 +2657,8 @@ function RewardView({ rewards, points, token, runAction, onScan, onRefresh, load
     <section className="panel">
       <div className="section-heading">
         <div>
-          <p className="eyebrow">Rewards catalog</p>
-          <h3>Redeem points</h3>
+          <p className="eyebrow">Redeem your points</p>
+          <h3>Rewards</h3>
         </div>
         <button type="button" className="secondary-button small" onClick={onRefresh} disabled={loading}>Refresh</button>
       </div>
@@ -2512,31 +2667,76 @@ function RewardView({ rewards, points, token, runAction, onScan, onRefresh, load
         <strong>{points} pts</strong>
         <button type="button" className="secondary-button small" onClick={onScan}>Earn points</button>
       </div>
-      <div className="item-grid">
-        {rewards.length === 0 && <EmptyState text="No rewards have been added yet." />}
-        {rewards.map((reward) => (
-          <article className="item-card resident-reward-card" key={reward._id}>
-            <RewardImage reward={reward} />
-            <div>
-              <span className={reward.status === 'active' ? 'badge success' : 'badge'}>{reward.status}</span>
-              <h4>{reward.name}</h4>
-              <p>{reward.description || 'Reward available from your community admin.'}</p>
-            </div>
-            <dl>
-              <div><dt>Cost</dt><dd>{reward.pointsCost} pts</dd></div>
-              <div><dt>Stock</dt><dd>{reward.stock}</dd></div>
-            </dl>
-            <button
-              type="button"
-              className="primary-button"
-              disabled={checkingBalance || reward.status !== 'active' || reward.stock <= 0}
-              onClick={() => openRewardConfirmation(reward)}
-            >
-              Redeem
-            </button>
-          </article>
-        ))}
+      <div className="segmented reward-view-tabs" aria-label="Reward sections">
+        <button type="button" className={rewardTab === 'browse' ? 'active' : ''} aria-pressed={rewardTab === 'browse'} onClick={() => setRewardTab('browse')}>Browse rewards</button>
+        <button type="button" className={rewardTab === 'pickups' ? 'active' : ''} aria-pressed={rewardTab === 'pickups'} onClick={() => setRewardTab('pickups')}>My pickups{pendingRedemptions.length > 0 && <span className="reward-tab-count">{pendingRedemptions.length}</span>}</button>
       </div>
+      {rewardTab === 'browse' ? (
+        <div className="reward-filter-section">
+          <div className="reward-simple-filters">
+            <input type="search" aria-label="Search rewards" value={catalogSearch} onChange={(event) => setCatalogSearch(event.target.value)} placeholder="Search rewards" />
+            <button type="button" className={redeemableOnly ? 'reward-filter-toggle active' : 'reward-filter-toggle'} aria-pressed={redeemableOnly} onClick={() => setRedeemableOnly((current) => !current)}>I can redeem</button>
+          </div>
+          <div className="item-grid resident-reward-grid">
+          {visibleRewards.length === 0 && <EmptyState text={rewards.length === 0 ? 'No rewards have been added yet.' : 'No rewards match these filters.'} />}
+          {visibleRewards.map((reward) => (
+            <article className="item-card resident-reward-card" key={reward._id}>
+              <RewardImage reward={reward} />
+              <div>
+                <div className="resident-reward-title">
+                  <h4>{reward.name}</h4>
+                  <strong>{reward.pointsCost} pts</strong>
+                </div>
+                <p>{reward.description || 'Reward available from your community admin.'}</p>
+                {(reward.status !== 'active' || reward.stock <= 0) && <span className="badge">{reward.stock <= 0 ? 'Out of stock' : 'Unavailable'}</span>}
+              </div>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={checkingBalance || reward.status !== 'active' || reward.stock <= 0}
+                onClick={() => openRewardConfirmation(reward)}
+              >
+                {reward.status !== 'active' || reward.stock <= 0 ? 'Unavailable' : 'Redeem'}
+              </button>
+            </article>
+          ))}
+          </div>
+        </div>
+      ) : (
+        <div className="resident-pickups">
+          <p className="pickup-guidance">Show your pickup code to barangay staff when you collect a reward.</p>
+          {pendingRedemptions.length === 0 ? <p className="pickup-empty">No rewards waiting for pickup.</p> : (
+            <div className="pickup-list">
+              {pendingRedemptions.map((redemption) => (
+                <article className="pickup-card" key={redemption._id}>
+                  <div className="pickup-card-heading">
+                    <strong>{redemption.rewardName}</strong>
+                    <span className="badge success">Ready for pickup</span>
+                  </div>
+                  <div className="pickup-code-wrap">
+                    <small>Pickup code</small>
+                    {redemption.pickupCode ? <code className="pickup-code">{redemption.pickupCode}</code> : <span className="pickup-code-error">Code unavailable. Tap Refresh or ask barangay staff for help.</span>}
+                  </div>
+                  <small>{redemption.pointsSpent} pts · Redeemed {new Date(redemption.redeemedAt).toLocaleDateString()}</small>
+                </article>
+              ))}
+            </div>
+          )}
+          {collectedRedemptions.length > 0 && (
+            <details className="pickup-history">
+              <summary>Collected rewards ({collectedRedemptions.length})</summary>
+              <div className="pickup-history-list">
+                {collectedRedemptions.map((redemption) => (
+                  <div className="pickup-history-row" key={redemption._id}>
+                    <strong>{redemption.rewardName}</strong>
+                    <small>Collected {new Date(redemption.claimedAt || redemption.redeemedAt).toLocaleDateString()}</small>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
+        </div>
+      )}
       {selectedReward && (
         <Modal title="Confirm reward" eyebrow="Before you redeem" onClose={() => setSelectedReward(null)}>
           <RewardImage reward={selectedReward} />
@@ -2560,11 +2760,61 @@ function RewardView({ rewards, points, token, runAction, onScan, onRefresh, load
           </div>
         </Modal>
       )}
+      {newRedemption && (
+        <Modal title="Reward reserved" eyebrow="Pickup at the barangay" onClose={() => setNewRedemption(null)}>
+          <div className="pickup-confirmation">
+            <p>Your points have been used to reserve <strong>{newRedemption.rewardName}</strong>. Show this code to barangay staff when you collect it.</p>
+            <code className="pickup-code">{newRedemption.pickupCode}</code>
+            <p>You can find this code again under My redemptions.</p>
+            <button type="button" className="primary-button" onClick={() => setNewRedemption(null)}>Done</button>
+          </div>
+        </Modal>
+      )}
     </section>
   );
 }
 
 function AdminRedemptions({ rewards, token, runAction }) {
+  const [code, setCode] = useState('');
+  const [found, setFound] = useState(null);
+  const [lookupError, setLookupError] = useState('');
+  const [searching, setSearching] = useState(false);
+  const [claiming, setClaiming] = useState(false);
+
+  async function findCode(event) {
+    event.preventDefault();
+    setSearching(true);
+    setFound(null);
+    setLookupError('');
+    try {
+      const response = await apiRequest('/api/rewards/redemptions/lookup', {
+        method: 'POST', token, body: { pickupCode: code },
+      });
+      setFound(response.data);
+      setCode(response.data.pickupCode);
+    } catch (error) {
+      setLookupError(error.message);
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  async function confirmHandover() {
+    if (!found || found.status !== 'pending' || claiming) return;
+    setClaiming(true);
+    try {
+      const result = await runAction(
+        () => apiRequest('/api/rewards/redemptions/claim', {
+          method: 'PUT', token, body: { pickupCode: found.pickupCode },
+        }),
+        'Reward handover confirmed'
+      );
+      if (result) setFound(result.data);
+    } finally {
+      setClaiming(false);
+    }
+  }
+
   return (
     <section className="panel">
       <div className="section-heading">
@@ -2573,6 +2823,28 @@ function AdminRedemptions({ rewards, token, runAction }) {
           <h3>Reward redemptions</h3>
         </div>
       </div>
+      <form className="pickup-lookup" onSubmit={findCode}>
+        <label htmlFor="pickup-code-search">Resident pickup code</label>
+        <p>Ask the resident for the code shown under My redemptions. Verify their name and reward before handing it over.</p>
+        <div className="pickup-lookup-row">
+          <input id="pickup-code-search" value={code} onChange={(event) => { setCode(event.target.value); setFound(null); setLookupError(''); }} placeholder="TQ-XXXXX-XXXXX" autoComplete="off" required />
+          <button type="submit" className="secondary-button" disabled={searching}>{searching ? 'Finding…' : 'Find redemption'}</button>
+        </div>
+        {lookupError && <p className="form-error" role="alert">{lookupError}</p>}
+      </form>
+      {found && (
+        <div className="pickup-result">
+          <div className="pickup-card-heading">
+            <strong>{found.rewardName}</strong>
+            <span className={found.status === 'pending' ? 'badge success' : 'badge'}>{found.status === 'pending' ? 'Pending pickup' : 'Already collected'}</span>
+          </div>
+          <p><strong>Resident:</strong> {found.resident?.name || 'Unknown resident'}{found.resident?.email ? ` (${found.resident.email})` : ''}</p>
+          <p><strong>Redeemed:</strong> {new Date(found.redeemedAt).toLocaleString()} · {found.pointsSpent} pts</p>
+          {found.status === 'pending' && <button type="button" className="primary-button" onClick={confirmHandover} disabled={claiming || !found.resident}>{claiming ? 'Confirming…' : 'Confirm handover'}</button>}
+          {found.status === 'pending' && !found.resident && <p className="form-error">Resident record was not found. Do not hand over this reward until the account is verified.</p>}
+          {found.status === 'claimed' && <p>This code cannot be claimed again.</p>}
+        </div>
+      )}
       <div className="table-wrap">
         <table>
           <thead>
@@ -2591,27 +2863,7 @@ function AdminRedemptions({ rewards, token, runAction }) {
                   <td>{reward.name}</td>
                   <td>{reward.pointsCost}</td>
                   <td>{reward.stock}</td>
-                  <td className="row-actions">
-                    {pending.length === 0 && 'None'}
-                    {pending.map((redemption) => (
-                      <button
-                        type="button"
-                        className="secondary-button small"
-                        key={redemption._id}
-                        onClick={() =>
-                          runAction(
-                            () => apiRequest(`/api/rewards/${reward._id}/redemptions/${redemption._id}/claim`, {
-                              method: 'PUT',
-                              token,
-                            }),
-                            'Redemption claimed'
-                          )
-                        }
-                      >
-                        Claim {redemption.pointsSpent} pts
-                      </button>
-                    ))}
-                  </td>
+                  <td>{pending.length || 'None'}</td>
                 </tr>
               );
             })}
