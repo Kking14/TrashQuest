@@ -2,9 +2,13 @@ import {
     createReward,
     getAllRewards,
     updateReward,
+    getRewardImage,
+    setRewardImage,
+    removeRewardImage,
     redeemReward,
     markRedemptionClaimed,
 } from '../services/rewardService.js';
+import { validateRewardImage } from '../utils/rewardImage.js';
 
 const addReward = async (req, res) => {
     try {
@@ -33,6 +37,40 @@ const editReward = async (req, res) => {
     }
 };
 
+const serveRewardImage = async (req, res) => {
+    try {
+        const reward = await getRewardImage(req.params.id);
+        if (!Buffer.isBuffer(reward?.imageData) || reward.imageContentType !== 'image/jpeg') {
+            return res.status(404).json({ success: false, message: 'Reward photo not found' });
+        }
+        res.set('Cache-Control', 'public, max-age=0, must-revalidate');
+        return res.type('jpeg').send(reward.imageData);
+    } catch {
+        return res.status(404).json({ success: false, message: 'Reward photo not found' });
+    }
+};
+
+const uploadRewardImage = async (req, res) => {
+    try {
+        validateRewardImage(req.body, req.get('Content-Type')?.split(';')[0]);
+        const reward = await setRewardImage(req.params.id, req.body);
+        if (!reward) return res.status(404).json({ success: false, message: 'Reward not found' });
+        return res.status(200).json({ success: true, message: 'Reward photo saved', data: reward });
+    } catch (error) {
+        return res.status(400).json({ success: false, message: error.message });
+    }
+};
+
+const deleteRewardImage = async (req, res) => {
+    try {
+        const reward = await removeRewardImage(req.params.id);
+        if (!reward) return res.status(404).json({ success: false, message: 'Reward not found' });
+        return res.status(200).json({ success: true, message: 'Reward photo removed', data: reward });
+    } catch (error) {
+        return res.status(400).json({ success: false, message: error.message });
+    }
+};
+
 const redeem = async (req, res) => {
     try {
         const redemption = await redeemReward(req.params.id, req.user.id);
@@ -51,4 +89,4 @@ const claimRedemption = async (req, res) => {
     }
 };
 
-export { addReward, listRewards, editReward, redeem, claimRedemption };
+export { addReward, listRewards, editReward, serveRewardImage, uploadRewardImage, deleteRewardImage, redeem, claimRedemption };

@@ -46,13 +46,75 @@ async function apiRequest(path, { method = 'GET', token, body, headers = {} } = 
   return payload;
 }
 
+async function prepareRewardPhoto(file) {
+  if (!file?.type?.startsWith('image/')) throw new Error('Choose an image file for the reward photo.');
+  if (file.size > 10 * 1024 * 1024) throw new Error('Choose a photo smaller than 10 MB.');
+
+  const objectUrl = URL.createObjectURL(file);
+  const image = new Image();
+  try {
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = () => reject(new Error('This photo could not be opened. Try a JPEG or PNG image.'));
+      image.src = objectUrl;
+    });
+    const canvas = document.createElement('canvas');
+    const longestSide = Math.max(image.naturalWidth, image.naturalHeight);
+    if (!longestSide) throw new Error('Choose a valid reward photo.');
+    const scale = Math.min(1, 1000 / longestSide);
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('This browser could not prepare the photo.');
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    const toJpeg = (quality) => new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+    let photo = await toJpeg(0.8);
+    if (photo?.size > 400 * 1024) photo = await toJpeg(0.6);
+    if (photo?.size > 400 * 1024) {
+      canvas.width = Math.max(1, Math.round(canvas.width * 0.7));
+      canvas.height = Math.max(1, Math.round(canvas.height * 0.7));
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      photo = await toJpeg(0.65);
+    }
+    if (!photo || photo.size > 400 * 1024) {
+      throw new Error('This photo is still too large after optimization. Try a simpler or smaller image.');
+    }
+    return photo;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function uploadRewardPhoto(rewardId, file, token) {
+  const photo = await prepareRewardPhoto(file);
+  const response = await fetch(`${API_BASE}/api/rewards/${rewardId}/image`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'image/jpeg' },
+    body: photo,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload.success === false) throw new Error(payload.message || 'Reward photo could not be saved.');
+  return payload;
+}
+
 function App() {
   const [publicMode, setPublicMode] = useState('auth');
   const [session, setSession] = useState(() => {
     const saved = localStorage.getItem('trashquest_session');
     return saved ? JSON.parse(saved) : null;
   });
-  const [view, setView] = useState('scan');
+  const [view, setView] = useState(() => {
+    const allowedViews = session?.role === 'admin'
+      ? ['admin-overview', 'admin-bins', 'admin-quests', 'admin-rewards', 'admin-users']
+      : ['scan', 'wallet', 'quests', 'rewards'];
+    const savedView = sessionStorage.getItem('trashquest_view');
+    return allowedViews.includes(savedView) ? savedView : allowedViews[0];
+  });
   const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(false);
   const [toasts, setToasts] = useState([]);
@@ -82,6 +144,10 @@ function App() {
     if (!token) return;
     refreshData();
   }, [token]);
+
+  useEffect(() => {
+    if (session) sessionStorage.setItem('trashquest_view', view);
+  }, [session, view]);
 
   useEffect(() => {
     if (!token || !isAdmin) return;
@@ -114,6 +180,44 @@ function App() {
     return () => {
       stopped = true;
       window.clearInterval(timer);
+    };
+  }, [token, isAdmin]);
+
+  useEffect(() => {
+    if (!token || isAdmin) return;
+    let stopped = false;
+    let inFlight = false;
+
+    async function refreshResidentCatalog() {
+      if (stopped || inFlight || document.visibilityState === 'hidden') return;
+      inFlight = true;
+      try {
+        const [quests, rewards] = await Promise.allSettled([
+          apiRequest('/api/quests/available', { token }),
+          apiRequest('/api/rewards', { token }),
+        ]);
+        if (!stopped && (quests.status === 'fulfilled' || rewards.status === 'fulfilled')) {
+          setData((current) => ({
+            ...current,
+            quests: quests.status === 'fulfilled' ? quests.value.data || [] : current.quests,
+            rewards: rewards.status === 'fulfilled' ? rewards.value.data || [] : current.rewards,
+          }));
+        }
+      } catch {
+        // Keep the last loaded catalog when the connection is temporarily unavailable.
+      } finally {
+        inFlight = false;
+      }
+    }
+
+    const timer = window.setInterval(refreshResidentCatalog, 10000);
+    window.addEventListener('focus', refreshResidentCatalog);
+    document.addEventListener('visibilitychange', refreshResidentCatalog);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refreshResidentCatalog);
+      document.removeEventListener('visibilitychange', refreshResidentCatalog);
     };
   }, [token, isAdmin]);
 
@@ -189,6 +293,7 @@ function App() {
 
   function logout() {
     localStorage.removeItem('trashquest_session');
+    sessionStorage.removeItem('trashquest_view');
     setSession(null);
     setView('scan');
     setData({ profile: null, bins: [], disposals: [], rewards: [], quests: [], users: [], logs: [] });
@@ -1233,6 +1338,11 @@ function ResidentApp({ data, loading, logout, notice, refreshData, runAction, se
     { id: 'rewards', label: 'Rewards', icon: '◇' },
   ];
 
+  function navigateTo(nextView) {
+    setView(nextView);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
   return (
     <main className="resident-shell">
       <header className="resident-header">
@@ -1248,20 +1358,21 @@ function ResidentApp({ data, loading, logout, notice, refreshData, runAction, se
         </button>
       </header>
 
-      {notice && <div className="notice">{notice}</div>}
+      {notice && <div className="notice" role="status">{notice}</div>}
 
-      {view === 'scan' && <ResidentScan token={token} runAction={runAction} />}
-      {view === 'wallet' && <ResidentWallet data={data} loading={loading} refreshData={refreshData} session={session} totals={totals} />}
-      {view === 'quests' && <QuestView quests={data.quests} session={session} />}
-      {view === 'rewards' && <RewardView rewards={data.rewards} points={data.profile?.points || 0} token={token} runAction={runAction} />}
+      {view === 'scan' && <ResidentScan token={token} runAction={runAction} onViewPoints={() => navigateTo('wallet')} />}
+      {view === 'wallet' && <ResidentWallet data={data} loading={loading} refreshData={refreshData} session={session} totals={totals} onScan={() => navigateTo('scan')} />}
+      {view === 'quests' && <QuestView quests={data.quests} session={session} onScan={() => navigateTo('scan')} onRefresh={refreshData} loading={loading} />}
+      {view === 'rewards' && <RewardView rewards={data.rewards} points={data.profile?.points || 0} token={token} runAction={runAction} onScan={() => navigateTo('scan')} onRefresh={refreshData} loading={loading} />}
 
-      <nav className="bottom-tabs">
+      <nav className="bottom-tabs" aria-label="Resident navigation">
         {tabs.map((tab) => (
           <button
             key={tab.id}
             type="button"
             className={view === tab.id ? 'active' : ''}
-            onClick={() => setView(tab.id)}
+            aria-current={view === tab.id ? 'page' : undefined}
+            onClick={() => navigateTo(tab.id)}
           >
             <span className="tab-icon" aria-hidden="true">{tab.icon}</span>
             <span>{tab.label}</span>
@@ -1272,7 +1383,7 @@ function ResidentApp({ data, loading, logout, notice, refreshData, runAction, se
   );
 }
 
-function ResidentScan({ token, runAction }) {
+function ResidentScan({ token, runAction, onViewPoints }) {
   const videoRef = useRef(null);
   const scannerRef = useRef(null);
   const claimingRef = useRef(false);
@@ -1448,15 +1559,16 @@ function ResidentScan({ token, runAction }) {
       <div className="scan-copy">
         <p className="eyebrow">Main action</p>
         <h2>Claim points from the bin screen</h2>
-        <p>{scannerMessage}</p>
+        <p role="status" aria-live="polite">{scannerMessage}</p>
       </div>
 
       <div className="scan-actions">
         {['starting', 'scanning'].includes(scannerState) ? (
-          <button type="button" className="secondary-button" onClick={stopCamera}>Stop camera</button>
+          <button type="button" className="secondary-button" onClick={() => stopCamera()}>Stop camera</button>
         ) : (
           <button type="button" className="primary-button" onClick={startCamera}>Open camera scanner</button>
         )}
+        {scannerState === 'claimed' && <button type="button" className="secondary-button" onClick={onViewPoints}>View my points</button>}
         <label className={`secondary-button qr-photo-button ${scannerState === 'reading-photo' ? 'disabled' : ''}`}>
           {scannerState === 'reading-photo' ? 'Reading image...' : 'Scan from photo or screenshot'}
           <input type="file" accept="image/*" onChange={handleQrImage} disabled={scannerState === 'reading-photo'} />
@@ -1470,15 +1582,18 @@ function ResidentScan({ token, runAction }) {
             value={manualToken}
             onChange={(event) => setManualToken(event.target.value)}
             placeholder="Example: TQ-AB23CD"
+            autoCapitalize="characters"
+            autoComplete="off"
+            spellCheck="false"
           />
         </label>
-        <button type="submit" className="secondary-button">Claim with code</button>
+        <button type="submit" className="secondary-button" disabled={!manualToken.trim()}>Claim with code</button>
       </form>
     </section>
   );
 }
 
-function ResidentWallet({ data, loading, refreshData, session, totals }) {
+function ResidentWallet({ data, loading, refreshData, session, totals, onScan }) {
   const totalPoints = data.profile?.points ?? session.points ?? totals.disposalPoints;
 
   return (
@@ -1497,7 +1612,12 @@ function ResidentWallet({ data, loading, refreshData, session, totals }) {
             Refresh
           </button>
         </div>
-        <DisposalTable disposals={data.disposals} compact />
+        {data.disposals.length === 0 ? (
+          <div className="resident-empty-action">
+            <p>No disposal sessions yet. Scan the QR code on the bin screen after your first deposit to claim points.</p>
+            <button type="button" className="primary-button" onClick={onScan}>Go to Scan</button>
+          </div>
+        ) : <DisposalTable disposals={data.disposals} compact />}
       </section>
     </div>
   );
@@ -1950,12 +2070,71 @@ function AdminQuestTools({ quests, token, runAction, loading }) {
   );
 }
 
+function RewardImage({ reward, compact = false }) {
+  const [failed, setFailed] = useState(false);
+  const imageUrl = reward.imageContentType === 'image/jpeg'
+    ? `${API_BASE}/api/rewards/${reward._id}/image?v=${encodeURIComponent(reward.imageUpdatedAt || '')}`
+    : null;
+
+  useEffect(() => setFailed(false), [imageUrl]);
+
+  return (
+    <div className={`reward-image ${compact ? 'compact' : ''}`}>
+      {imageUrl && !failed ? (
+        <img src={imageUrl} alt={`Photo of ${reward.name}`} loading="lazy" decoding="async" onError={() => setFailed(true)} />
+      ) : (
+        <span className="reward-image-placeholder" aria-hidden="true">🎁{!compact && <small>Photo coming soon</small>}</span>
+      )}
+    </div>
+  );
+}
+
+function RewardPhotoPicker({ file, onChange }) {
+  const [previewUrl, setPreviewUrl] = useState('');
+
+  useEffect(() => {
+    if (!file) {
+      setPreviewUrl('');
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  return (
+    <div className="reward-photo-picker">
+      <label>
+        Reward photo (optional)
+        <input type="file" accept="image/*" onChange={(event) => onChange(event.target.files?.[0] || null)} />
+      </label>
+      {previewUrl && <img className="reward-photo-preview" src={previewUrl} alt="Selected reward photo preview" />}
+      <small>The photo will be resized and optimized before upload. Maximum original file size: 10 MB.</small>
+    </div>
+  );
+}
+
 function AdminRewardTools({ rewards, token, runAction, loading }) {
   const [showAddModal, setShowAddModal] = useState(false);
+  const [addImageFile, setAddImageFile] = useState(null);
+  const [photoReward, setPhotoReward] = useState(null);
+  const [editImageFile, setEditImageFile] = useState(null);
+
+  function closeAddModal() {
+    setShowAddModal(false);
+    setAddImageFile(null);
+  }
+
+  function closePhotoModal() {
+    setPhotoReward(null);
+    setEditImageFile(null);
+  }
 
   async function createReward(event) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const photoFile = addImageFile;
     const result = await runAction(
       () => apiRequest('/api/rewards', {
         method: 'POST',
@@ -1970,9 +2149,31 @@ function AdminRewardTools({ rewards, token, runAction, loading }) {
       'Reward created'
     );
     if (result) {
-      event.currentTarget.reset();
-      setShowAddModal(false);
+      formElement.reset();
+      closeAddModal();
+      if (photoFile) {
+        await runAction(() => uploadRewardPhoto(result.data._id, photoFile, token), 'Reward photo added');
+      }
     }
+  }
+
+  async function savePhoto(event) {
+    event.preventDefault();
+    if (!photoReward || !editImageFile) return;
+    const result = await runAction(
+      () => uploadRewardPhoto(photoReward._id, editImageFile, token),
+      'Reward photo saved'
+    );
+    if (result) closePhotoModal();
+  }
+
+  async function removePhoto() {
+    if (!photoReward) return;
+    const result = await runAction(
+      () => apiRequest(`/api/rewards/${photoReward._id}/image`, { method: 'DELETE', token }),
+      'Reward photo removed'
+    );
+    if (result) closePhotoModal();
   }
 
   return (
@@ -1981,40 +2182,55 @@ function AdminRewardTools({ rewards, token, runAction, loading }) {
         <div><p className="eyebrow">Rewards catalog</p><h3>Available rewards</h3></div>
         <button type="button" className="primary-button" onClick={() => setShowAddModal(true)}>+ Add reward</button>
       </div>
-      <AdminRewardCatalog rewards={rewards} />
+      <AdminRewardCatalog rewards={rewards} onEditPhoto={(reward) => { setPhotoReward(reward); setEditImageFile(null); }} />
       {showAddModal && (
-      <Modal title="Add a reward" eyebrow="Catalog item" onClose={() => setShowAddModal(false)}>
+      <Modal title="Add a reward" eyebrow="Catalog item" onClose={closeAddModal}>
       <AdminForm title="Add reward" eyebrow="Catalog" onSubmit={createReward}>
         <label>Name<input name="name" placeholder="Eco voucher" required /></label>
         <label>Description<input name="description" placeholder="Redeem at the admin booth" /></label>
         <label>Points cost<input name="pointsCost" type="number" min="0" defaultValue="100" required /></label>
         <label>Stock<input name="stock" type="number" min="0" defaultValue="10" required /></label>
+        <RewardPhotoPicker file={addImageFile} onChange={setAddImageFile} />
         <button className="primary-button" type="submit" disabled={loading}>Create reward</button>
       </AdminForm>
       </Modal>
+      )}
+      {photoReward && (
+        <Modal title={`Photo for ${photoReward.name}`} eyebrow="Reward image" onClose={closePhotoModal}>
+          <form className="reward-photo-editor" onSubmit={savePhoto}>
+            <RewardImage reward={photoReward} />
+            <RewardPhotoPicker file={editImageFile} onChange={setEditImageFile} />
+            <div className="reward-photo-actions">
+              <button type="button" className="secondary-button" onClick={closePhotoModal}>Cancel</button>
+              {photoReward.imageContentType && <button type="button" className="danger-button" onClick={removePhoto} disabled={loading}>Remove photo</button>}
+              <button type="submit" className="primary-button" disabled={loading || !editImageFile}>Save photo</button>
+            </div>
+          </form>
+        </Modal>
       )}
       <AdminRedemptions rewards={rewards} token={token} runAction={runAction} />
     </div>
   );
 }
 
-function AdminRewardCatalog({ rewards }) {
+function AdminRewardCatalog({ rewards, onEditPhoto }) {
   return (
     <section className="panel">
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Reward</th><th>Description</th><th>Cost</th><th>Stock</th><th>Status</th></tr></thead>
+          <thead><tr><th>Reward</th><th>Description</th><th>Cost</th><th>Stock</th><th>Status</th><th>Photo</th></tr></thead>
           <tbody>
             {rewards.map((reward) => (
               <tr key={reward._id}>
-                <td><strong>{reward.name}</strong></td>
+                <td><div className="admin-reward-name"><RewardImage reward={reward} compact /><strong>{reward.name}</strong></div></td>
                 <td>{reward.description || '—'}</td>
                 <td>{reward.pointsCost} pts</td>
                 <td>{reward.stock}</td>
                 <td><span className={reward.status === 'active' ? 'badge success' : 'badge'}>{reward.status}</span></td>
+                <td><button type="button" className="secondary-button small" onClick={() => onEditPhoto(reward)}>{reward.imageContentType ? 'Change photo' : 'Add photo'}</button></td>
               </tr>
             ))}
-            {rewards.length === 0 && <TableEmpty colSpan={5} text="No rewards found." />}
+            {rewards.length === 0 && <TableEmpty colSpan={6} text="No rewards found." />}
           </tbody>
         </table>
       </div>
@@ -2030,6 +2246,33 @@ function getQuestTargetLabel(quest) {
 
 function QuestHistoryTable({ quests, session, admin, onEdit, onDelete }) {
   const orderedQuests = [...quests].sort((a, b) => new Date(b.expiryDate) - new Date(a.expiryDate));
+  if (!admin) {
+    return (
+      <div className="resident-quest-history">
+        {orderedQuests.length === 0 && <EmptyState text="No completed quests yet." />}
+        {orderedQuests.map((quest) => {
+          const participant = quest.participants?.find((entry) => {
+            const participantId = entry.user?._id || entry.user;
+            return participantId?.toString() === session?._id?.toString();
+          });
+          return (
+            <article className="resident-quest-history-card" key={quest._id}>
+              <div className="resident-quest-history-heading">
+                <h4>{quest.title}</h4>
+                <span className="badge success">Completed</span>
+              </div>
+              <p>{quest.frequency || 'daily'} · {quest.wasteType || 'Any waste'}</p>
+              <dl>
+                <div><dt>Progress</dt><dd>{quest.targetCount ? `${participant?.progress || 0}/${quest.targetCount} items` : 'Target completed'}</dd></div>
+                <div><dt>Reward</dt><dd>{quest.pointsReward} pts</dd></div>
+                <div><dt>Completed</dt><dd>{formatDate(participant?.completedAt || quest.expiryDate)}</dd></div>
+              </dl>
+            </article>
+          );
+        })}
+      </div>
+    );
+  }
   return (
     <div className="table-wrap quest-history-table">
       <table>
@@ -2092,7 +2335,7 @@ function QuestHistoryTable({ quests, session, admin, onEdit, onDelete }) {
   );
 }
 
-function QuestView({ quests, session, admin = false, history = false, onEdit, onDelete }) {
+function QuestView({ quests, session, admin = false, history = false, onEdit, onDelete, onScan, onRefresh, loading }) {
   const [residentQuestTab, setResidentQuestTab] = useState('current');
   const residentQuestRows = quests.map((quest) => {
     const participant = quest.participants?.find((entry) => {
@@ -2114,6 +2357,7 @@ function QuestView({ quests, session, admin = false, history = false, onEdit, on
           <p className="eyebrow">Community goals</p>
           <h3>{admin ? (history ? 'Quest history' : 'Current quests') : 'Available quests'}</h3>
         </div>
+        {!admin && <button type="button" className="secondary-button small" onClick={onRefresh} disabled={loading}>Refresh</button>}
       </div>
       {!admin && (
         <div className="content-tabs resident-quest-tabs" role="tablist" aria-label="Quest views">
@@ -2209,11 +2453,14 @@ function QuestView({ quests, session, admin = false, history = false, onEdit, on
         })}
       </div>
       )}
+      {!admin && residentQuestTab === 'current' && visibleQuests.length > 0 && (
+        <button type="button" className="secondary-button resident-section-action" onClick={onScan}>Scan a bin QR to update quest progress</button>
+      )}
     </section>
   );
 }
 
-function RewardView({ rewards, points, token, runAction }) {
+function RewardView({ rewards, points, token, runAction, onScan, onRefresh, loading }) {
   const [selectedReward, setSelectedReward] = useState(null);
   const [verifiedPoints, setVerifiedPoints] = useState(points);
   const [checkingBalance, setCheckingBalance] = useState(false);
@@ -2258,11 +2505,18 @@ function RewardView({ rewards, points, token, runAction }) {
           <p className="eyebrow">Rewards catalog</p>
           <h3>Redeem points</h3>
         </div>
+        <button type="button" className="secondary-button small" onClick={onRefresh} disabled={loading}>Refresh</button>
+      </div>
+      <div className="resident-points-summary">
+        <span>Available balance</span>
+        <strong>{points} pts</strong>
+        <button type="button" className="secondary-button small" onClick={onScan}>Earn points</button>
       </div>
       <div className="item-grid">
         {rewards.length === 0 && <EmptyState text="No rewards have been added yet." />}
         {rewards.map((reward) => (
-          <article className="item-card" key={reward._id}>
+          <article className="item-card resident-reward-card" key={reward._id}>
+            <RewardImage reward={reward} />
             <div>
               <span className={reward.status === 'active' ? 'badge success' : 'badge'}>{reward.status}</span>
               <h4>{reward.name}</h4>
@@ -2285,6 +2539,7 @@ function RewardView({ rewards, points, token, runAction }) {
       </div>
       {selectedReward && (
         <Modal title="Confirm reward" eyebrow="Before you redeem" onClose={() => setSelectedReward(null)}>
+          <RewardImage reward={selectedReward} />
           <div className="reward-confirmation">
             <div className="reward-confirmation-icon">◇</div>
             <div>

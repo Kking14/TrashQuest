@@ -35,6 +35,18 @@ const rewardSchema = new mongoose.Schema({
         type: String,
         default: null,
     },
+    imageData: {
+        type: Buffer,
+        select: false,
+    },
+    imageContentType: {
+        type: String,
+        default: null,
+    },
+    imageUpdatedAt: {
+        type: Date,
+        default: null,
+    },
     pointsCost: {
         type: Number,
         required: [true, 'Points cost is required'],

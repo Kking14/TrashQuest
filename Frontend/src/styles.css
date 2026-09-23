@@ -1630,3 +1630,144 @@ body { background: #edf3ef; }
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* Resident portal: keep the primary actions usable on narrow, notched phones. */
+.resident-shell {
+  min-width: 0;
+  padding-bottom: calc(112px + env(safe-area-inset-bottom, 0px));
+}
+
+.resident-identity { min-width: 0; }
+.resident-identity > div:last-child { min-width: 0; }
+.resident-header h1 { overflow-wrap: anywhere; }
+.resident-shell .notice { overflow-wrap: anywhere; }
+.resident-shell .panel,
+.resident-shell .phone-scan-card { min-width: 0; }
+.resident-shell button,
+.resident-shell .qr-photo-button { touch-action: manipulation; }
+.resident-shell button:focus-visible,
+.resident-shell .qr-photo-button:focus-within {
+  outline: 3px solid #174d36;
+  outline-offset: 3px;
+}
+.resident-shell .qr-photo-button { position: relative; min-height: 48px; text-align: center; }
+.resident-shell .scan-actions .primary-button,
+.resident-shell .scan-actions .secondary-button,
+.resident-shell .manual-claim button { min-height: 48px; }
+.resident-shell .manual-claim input { min-height: 48px; font-size: 16px; }
+.resident-shell .bottom-tabs {
+  bottom: max(10px, env(safe-area-inset-bottom, 0px));
+}
+.resident-empty-action { display: grid; gap: 14px; justify-items: start; }
+.resident-empty-action p { margin: 0; color: var(--muted); line-height: 1.5; }
+.resident-section-action { width: 100%; margin-top: 18px; }
+.resident-quest-history { display: grid; gap: 12px; }
+.resident-quest-history-card { min-width: 0; border: 1px solid #e1e9e3; border-radius: 13px; padding: 15px; background: #f9fcfa; }
+.resident-quest-history-heading { display: flex; align-items: start; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.resident-quest-history-heading h4 { margin: 0; color: #17372b; font-size: 1.05rem; }
+.resident-quest-history-card p { margin: 6px 0 14px; color: var(--muted); font-size: .85rem; }
+.resident-quest-history-card dl { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin: 0; }
+.resident-quest-history-card dl div { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; min-width: 0; }
+.resident-quest-history-card dt { color: var(--muted); }
+.resident-quest-history-card dd { min-width: 0; margin: 0; color: #17372b; font-weight: 800; text-align: right; overflow-wrap: normal; }
+.resident-points-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 18px;
+  border-radius: 13px;
+  padding: 13px 15px;
+  background: #eaf6ed;
+  color: #315f4c;
+}
+.resident-points-summary strong { margin-right: auto; color: #143e2d; font-size: 1.25rem; }
+.resident-points-summary .small { min-height: 42px; }
+
+@media (max-width: 480px) {
+  .auth-page { overflow-x: hidden; overflow-y: visible; }
+  .auth-form { order: -1; }
+  .auth-copy { min-height: 0; padding: 24px 22px; }
+  .landing-brand { margin-bottom: 20px; }
+  .landing-art { display: none; }
+  .resident-shell { padding-right: 12px; padding-left: 12px; }
+  .resident-header { margin-right: -12px; margin-left: -12px; padding: 16px 16px 14px; }
+  .resident-header h1 { font-size: clamp(1.12rem, 5vw, 1.4rem); }
+  .resident-logo { flex: 0 0 42px; width: 42px; height: 42px; }
+  .resident-header .icon-button { min-width: 48px; min-height: 48px; }
+  .resident-shell .phone-scan-card { gap: 16px; padding: 14px; }
+  .resident-shell .scan-hero { aspect-ratio: 1.6 / 1; }
+  .resident-shell .scan-corners { width: min(120px, 40vw); }
+  .resident-shell .scan-copy h2 { font-size: clamp(1.35rem, 6vw, 1.7rem); line-height: 1.15; }
+  .resident-shell .scan-copy p { margin-bottom: 0; }
+  .resident-shell .bottom-tabs { width: calc(100% - 16px); gap: 2px; padding: 6px; }
+  .resident-shell .bottom-tabs button { min-height: 54px; padding: 4px 2px; font-size: .7rem; }
+  .resident-shell .resident-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .resident-shell .metric { min-height: 105px; padding: 14px; }
+  .resident-shell .metric strong { font-size: clamp(1.55rem, 7vw, 2rem); }
+  .resident-quest-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+  .resident-quest-tabs button { justify-content: center; min-width: 0; padding: 0 5px; }
+  .resident-points-summary .small { width: 100%; }
+}
+
+@media (max-width: 640px) {
+  .app-shell .sidebar { gap: 12px; padding: 14px; }
+  .app-shell .brand-block { gap: 10px; }
+  .app-shell .brand-mark { width: 42px; height: 42px; flex: 0 0 42px; }
+  .app-shell .brand-block h1 { font-size: 1.15rem; }
+  .app-shell .nav-list { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .app-shell .nav-list button { justify-content: center; min-width: 0; min-height: 44px; padding: 8px 5px; font-size: .8rem; text-align: center; }
+  .app-shell .nav-icon { display: none; }
+  .app-shell .profile-box { grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; margin-top: 0; padding-top: 10px; }
+  .app-shell .profile-box strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .app-shell .profile-box span,
+  .app-shell .profile-box .badge { display: none; }
+  .app-shell .profile-box .ghost-button { grid-column: 2; grid-row: 1; min-height: 42px; margin: 0; padding: 8px 12px; white-space: nowrap; }
+}
+
+@media (max-width: 360px) {
+  .resident-identity { gap: 8px; }
+  .resident-header .eyebrow { font-size: .63rem; }
+  .resident-shell .resident-metrics { grid-template-columns: 1fr; }
+  .resident-shell .metric { min-height: 85px; }
+}
+
+/* Reward photos stay optional, readable, and lightweight on mobile. */
+.reward-image {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  max-height: 230px;
+  overflow: hidden;
+  border: 1px solid #deeadf;
+  border-radius: 14px;
+  background: #f1f7f2;
+}
+.reward-image img {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: center;
+}
+.reward-image-placeholder { display: grid; justify-items: center; gap: 7px; color: #5e896f; font-size: 2rem; }
+.reward-image-placeholder small { color: #617a6a; font-size: .76rem; font-weight: 800; }
+.reward-image.compact { flex: 0 0 58px; width: 58px; height: 58px; max-height: none; aspect-ratio: 1; border-radius: 10px; }
+.reward-image.compact .reward-image-placeholder { font-size: 1.3rem; }
+.admin-reward-name { display: flex; align-items: center; gap: 10px; min-width: 150px; }
+.resident-reward-card { min-width: 0; }
+.resident-reward-card .reward-image { margin-bottom: 2px; }
+.reward-photo-picker { display: grid; grid-column: 1 / -1; gap: 10px; min-width: 0; }
+.reward-photo-picker input { min-height: 48px; }
+.reward-photo-picker small { color: var(--muted); line-height: 1.4; }
+.reward-photo-preview { display: block; width: min(100%, 320px); max-height: 210px; border: 1px solid #deeadf; border-radius: 12px; background: #f1f7f2; object-fit: contain; }
+.reward-photo-editor { display: grid; gap: 16px; }
+.reward-photo-editor > .reward-image { max-height: 180px; }
+.reward-photo-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+@media (max-width: 480px) {
+  .reward-photo-actions { display: grid; grid-template-columns: 1fr; }
+}
