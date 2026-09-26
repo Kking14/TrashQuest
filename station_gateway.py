@@ -203,7 +203,7 @@ def update_camera_stability(detector, detections, captured_at):
 def record_fullness(message):
     """Apply sensor data immediately; backend HTTP latency cannot clear a newer reading."""
     bin_type = message.get("binType", "plastic")
-    if bin_type not in {"plastic", "metal"} or not isinstance(message.get("isFull"), bool):
+    if bin_type not in {"plastic", "metal", "paper"} or not isinstance(message.get("isFull"), bool):
         return False
     previous = station_status["binCompartments"].get(bin_type, {})
     valid = message.get("readingValid", True) is True

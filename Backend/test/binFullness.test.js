@@ -4,7 +4,7 @@ import { applyFullnessReading } from '../src/utils/binFullness.js';
 import { compartmentStatus, fullBinDescription } from '../../Frontend/src/binFullness.js';
 
 test('each compartment independently keeps the whole station full', () => {
-    for (const [first, second] of [['plastic', 'metal'], ['metal', 'plastic']]) {
+    for (const [first, second] of [['plastic', 'metal'], ['metal', 'plastic'], ['paper', 'plastic']]) {
         let state = applyFullnessReading({}, { binType: first, isFull: true });
         state = applyFullnessReading(state.compartments, { binType: second, isFull: false });
         assert.equal(state.isFull, true);
@@ -42,6 +42,7 @@ test('admin names the actual full bin and shows missing/stale readings', () => {
     assert.equal(compartmentStatus({ ...reading, updatedAt: now / 1000 }, now).fresh, true);
     assert.equal(compartmentStatus({ ...reading, isFull: true }, now + 31000).full, true);
     assert.equal(fullBinDescription({ compartments: { metal: { isFull: true } } }), 'Metal bin is full');
+    assert.equal(fullBinDescription({ compartments: { paper: { isFull: true } } }), 'Paper bin is full');
     assert.equal(fullBinDescription({ compartments: { plastic: { isFull: true }, metal: { isFull: true } } }),
         'Plastic bin and Metal bin are full');
 });
