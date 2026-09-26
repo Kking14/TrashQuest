@@ -32,11 +32,17 @@ const registerDisposalClaim = async (req, res) => {
 
 const registerDisposalSession = async (req, res) => {
     try {
-        const session = await createDisposalSession(req.bin, req.body.claimTokens);
+        const { session, skippedClaimCount } = await createDisposalSession(req.bin, req.body.claimTokens);
         res.status(201).json({
             success: true,
             message: 'Disposal session created',
-            data: { sessionCode: session.code, itemCount: session.itemCount, expiresAt: session.expiresAt },
+            data: {
+                sessionCode: session.code,
+                claimTokens: session.claimTokens,
+                itemCount: session.itemCount,
+                expiresAt: session.expiresAt,
+                skippedClaimCount,
+            },
         });
     } catch (error) {
         res.status(400).json({ success: false, message: error.message });
@@ -63,9 +69,21 @@ const claimDisposalPoints = async (req, res) => {
         }
 
         const disposals = [];
+        let skippedClaimCount = 0;
         for (const claimToken of claimTokens) {
-            disposals.push(await claimDisposal(claimToken, req.user.id, disposalSession));
+            try {
+                disposals.push(await claimDisposal(claimToken, req.user.id, disposalSession));
+            } catch (error) {
+                // A session can outlive its oldest claim. Preserve points for
+                // the other, still-available successful sorts.
+                if (disposalSession && /^(This code has expired|This code has already been claimed|Invalid claim code)$/.test(error.message)) {
+                    skippedClaimCount += 1;
+                    continue;
+                }
+                throw error;
+            }
         }
+        if (disposals.length === 0) throw new Error('No disposal claims in this session are still available');
         const totalPoints = disposals.reduce(
             (sum, disposal) => sum + (disposal.pointsAwarded || 0),
             0
@@ -82,7 +100,7 @@ const claimDisposalPoints = async (req, res) => {
         res.status(200).json({
             success: true,
             message: 'Session points claimed successfully',
-            data: { disposals, totalPoints, completedQuests, questProgressUpdates, questUpdateWarnings },
+            data: { disposals, totalPoints, skippedClaimCount, completedQuests, questProgressUpdates, questUpdateWarnings },
         });
     } catch (error) {
         res.status(400).json({ success: false, message: error.message });

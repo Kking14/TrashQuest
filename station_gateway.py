@@ -25,7 +25,7 @@ except ImportError:  # Pure unit tests do not need the optional station packages
     def load_dotenv(*_args, **_kwargs):
         return False
 
-from station_detection import BatchCoordinator, Detection, PlatformClearTracker, StableBatchDetector
+from station_detection import BatchCoordinator, Detection, MetalObjectMatcher, PlatformClearTracker, StableBatchDetector
 
 
 ROOT = Path(__file__).resolve().parent
@@ -62,6 +62,7 @@ BAUD_RATE = int(os.getenv("TQ_BAUD_RATE", "115200"))
 CAMERA_INDEX = int(os.getenv("TQ_CAMERA_INDEX", "0"))
 CONFIDENCE = float(os.getenv("TQ_DETECTION_CONFIDENCE", os.getenv("TQ_CONFIDENCE", "0.63")))
 PLATFORM_ROI = parse_roi(os.getenv("TQ_PLATFORM_ROI", "0.15,0.18,0.85,0.88"))
+INDUCTIVE_ROI = parse_roi(os.getenv("TQ_INDUCTIVE_ROI", "0.53,0.41,0.59,0.49"))
 STABILITY_SECONDS = float(os.getenv("TQ_COUNT_STABILITY_SECONDS", "1.5"))
 EMPTY_REARM_SECONDS = float(os.getenv("TQ_PLATFORM_EMPTY_SECONDS", "1.2"))
 SORT_TIMEOUT = float(os.getenv("TQ_SORT_TIMEOUT_SECONDS", "30"))
@@ -101,6 +102,8 @@ station_status = {
     "simulation": SIMULATION_MODE, "workflowState": "IDLE",
     "acceptingItems": True, "binFull": False, "platformClear": False, "activeSource": None, "lastError": None,
     "activeModel": "current", "modelSwitching": False,
+    "manualRecoveryRequired": False,
+    "binCompartments": {}, "metalCheckReady": False,
 }
 model_lock = threading.Lock()
 active_model = None
@@ -108,17 +111,30 @@ active_model_key = "current"
 model_generation = 0
 model_switching = False
 MIXED_WASTE_MESSAGE = "Two different waste types detected. Please put only one waste type at a time. Remove all items to try again."
-sensor_interlock_lock = threading.Lock()
+sensor_interlock_lock = threading.RLock()
 sensor_clear_since = None
+metal_matcher = MetalObjectMatcher(INDUCTIVE_ROI)
 
 
 def update_sensor_interlock(*, metal=None, ai_visible=None):
     """Latch simultaneous metal/camera detections until both sensors stay clear."""
     global sensor_clear_since
     with sensor_interlock_lock:
+        metal_sort_committed = (station_status.get("activeSource") == "inductive_sensor"
+                                and station_status.get("workflowState") == "SORTING")
         if metal is not None:
+            if metal and not station_status.get("inductiveActive", False):
+                station_status["metalSignalAt"] = time.monotonic()
+                station_status["metalCheckReady"] = False
+                # The old AI box may be the can itself. Re-evaluate a fresh
+                # frame against the sensor position before calling it mixed.
+                station_status["aiWasteVisible"] = False
             station_status["inductiveActive"] = bool(metal)
-        if ai_visible is not None:
+        if metal_sort_committed:
+            # The camera cannot identify a rolling can reliably after the
+            # motor starts. Mixed waste was checked before committing the sort.
+            station_status["aiWasteVisible"] = False
+        elif ai_visible is not None:
             station_status["aiWasteVisible"] = bool(ai_visible)
         metal_active = station_status.get("inductiveActive", False)
         camera_active = station_status.get("aiWasteVisible", False)
@@ -143,6 +159,63 @@ def update_sensor_interlock(*, metal=None, ai_visible=None):
 
 def mixed_waste_blocked():
     return station_status.get("mixedWasteBlocked", False) or station_status.get("sensorMixedBlocked", False)
+
+
+def associate_metal(detections, captured_at):
+    with sensor_interlock_lock:
+        if (station_status.get("activeSource") == "inductive_sensor"
+                and station_status.get("workflowState") == "SORTING"):
+            # Treat all camera boxes during motion as untrusted. A can can roll
+            # out of its original box and be relabeled plastic or paper.
+            update_sensor_interlock(ai_visible=False)
+            station_status["metalCheckReady"] = True
+            return [], None, False, True
+        metal_active = station_status.get("inductiveActive", False)
+        transaction_active = (station_status.get("activeSource") == "inductive_sensor"
+                              and station_status.get("workflowState") in
+                              {"PREPARING", "SORTING", "WAITING_FOR_PLATFORM_EMPTY", "ERROR_RECOVERY"})
+        visible = [item for item in detections if item.confidence >= max(0.05, CONFIDENCE * 0.75)
+                   and PLATFORM_ROI[0] <= (item.box[0] + item.box[2]) / 2 <= PLATFORM_ROI[2]
+                   and PLATFORM_ROI[1] <= (item.box[1] + item.box[3]) / 2 <= PLATFORM_ROI[3]]
+        if metal_active and captured_at <= station_status.get("metalSignalAt", 0):
+            return [], None, True, True
+        remaining, matched, pending = metal_matcher.update(
+            visible, metal_active=metal_active, transaction_active=transaction_active, now=captured_at)
+        # Additional boxes always count, even while the matched box stabilizes.
+        update_sensor_interlock(ai_visible=bool(remaining))
+        station_status["metalCheckReady"] = not pending
+        station_status["metalMatched"] = matched is not None
+        return remaining, matched, pending, metal_active or transaction_active
+
+
+def update_camera_stability(detector, detections, captured_at):
+    """Keep the accepted camera batch fixed while the mechanism is moving."""
+    with sensor_interlock_lock:
+        if station_status.get("workflowState") == "SORTING":
+            # Motion can make one paper item briefly look like plastic (or
+            # split it into two boxes). Validate mixed waste before motion.
+            return None
+        stable = detector.update(detections, captured_at)
+        station_status["mixedWasteBlocked"] = detector.mixed_blocked
+        return stable
+
+
+def record_fullness(message):
+    """Apply sensor data immediately; backend HTTP latency cannot clear a newer reading."""
+    bin_type = message.get("binType", "plastic")
+    if bin_type not in {"plastic", "metal"} or not isinstance(message.get("isFull"), bool):
+        return False
+    previous = station_status["binCompartments"].get(bin_type, {})
+    valid = message.get("readingValid", True) is True
+    reading = {"isFull": message["isFull"] if valid else bool(previous.get("isFull") or message["isFull"]),
+               "readingValid": valid, "distanceCm": message.get("distanceCm") if valid else None,
+               "updatedAt": time.time()}
+    station_status["binCompartments"][bin_type] = reading
+    station_status["binFull"] = any(item["isFull"] for item in station_status["binCompartments"].values())
+    publish({"type": "bin_fullness", "binType": bin_type, **reading})
+    return True
+
+
 frame_lock = threading.Condition()
 latest_jpeg: bytes | None = None
 vision_sequence = 0
@@ -161,10 +234,36 @@ def publish(event: dict) -> None:
 
 
 def set_workflow(state: str, error: str | None = None) -> None:
+    if station_status.get("manualRecoveryRequired"):
+        state = "ERROR_RECOVERY"
+        error = station_status.get("lastError")
     station_status["workflowState"] = state
     if error is not None:
         station_status["lastError"] = error
     publish({"type": "status", "state": state, **({"message": error} if error else {})})
+
+
+def handle_controller_recovery(message: dict) -> bool:
+    """Keep a physical recovery lock until the ESP32 reports a fresh boot."""
+    if message.get("requiresManualReset"):
+        first_report = not station_status.get("manualRecoveryRequired")
+        notice = message.get("message") or (
+            "Sorting locked. Remove the waste, check the mechanism and return it home, "
+            "then press ESP32 EN to restart."
+        )
+        station_status.update(manualRecoveryRequired=True, acceptingItems=False,
+                              lastError=notice, scanning=False)
+        set_workflow("ERROR_RECOVERY", notice)
+        if first_report or message.get("event") == "error":
+            publish({"type": "error", "detectionId": message.get("detectionId"), "message": notice})
+        return True
+    if message.get("event") == "ready" and station_status.get("manualRecoveryRequired"):
+        coordinator.clear()
+        station_status.update(manualRecoveryRequired=False, acceptingItems=True,
+                              activeSource=None, lastError=None)
+        set_workflow("IDLE")
+        publish({"type": "recovery_cleared", "message": "Station restarted. Clear the platform before placing the next item."})
+    return False
 
 
 def backend_claim(batch: dict) -> dict:
@@ -224,12 +323,13 @@ def report_fullness(job: dict) -> None:
         raise RuntimeError("TQ_DEVICE_KEY is not configured")
     request = Request(
         f"{BACKEND_URL}/api/bins/sensor/full-status",
-        data=json.dumps({"isFull": job["isFull"]}).encode(), method="PUT",
+        data=json.dumps({"isFull": job["isFull"], "binType": job.get("binType", "plastic"),
+                         "readingValid": job.get("readingValid", True), "distanceCm": job.get("distanceCm")}).encode(), method="PUT",
         headers={"Content-Type": "application/json", "X-Device-Key": DEVICE_KEY},
     )
     with urlopen(request, timeout=HTTP_TIMEOUT) as response:
         result = json.load(response)["data"]
-    station_status.update(binFull=job["isFull"], fullnessDistanceCm=job.get("distanceCm"), lastFullnessReportAt=time.time())
+    station_status["lastFullnessReportAt"] = time.time()
     publish({"type": "bin_fullness", **job, "bin": result})
 
 
@@ -338,7 +438,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self._json(200, {"active": selected, "message": "Model ready."})
                 return
             if self.path == "/continue":
-                if coordinator.active_detection_id:
+                if station_status.get("manualRecoveryRequired"):
+                    self._json(409, {"message": station_status["lastError"]})
+                elif coordinator.active_detection_id:
                     self._json(409, {"message": "Wait for the platform to clear before continuing."})
                 else:
                     station_status["acceptingItems"] = True
@@ -400,6 +502,9 @@ def serial_reader(device) -> None:
                     raise
                 message = json.loads(line[object_start:object_end + 1])
             if not isinstance(message, dict): continue
+            if handle_controller_recovery(message):
+                print("ESP32 ->", message)
+                continue
             if message.get("event") == "inductive_state":
                 update_sensor_interlock(metal=message.get("active", False))
                 continue
@@ -410,9 +515,9 @@ def serial_reader(device) -> None:
                 publish({"type": "mixed_waste_rejected", "message": MIXED_WASTE_MESSAGE})
                 continue
             if message.get("event") == "bin_fullness":
-                station_status["binFull"] = bool(message.get("isFull"))
-                try: backend_jobs.put_nowait({"kind": "fullness", **message})
-                except queue.Full: publish({"type": "error", "message": "Fullness report queue is busy"})
+                if record_fullness(message):
+                    try: backend_jobs.put_nowait({"kind": "fullness", **message})
+                    except queue.Full: publish({"type": "error", "message": "Fullness report queue is busy"})
                 continue
             workflow_events.put(message, timeout=0.2)
             print("ESP32 ->", message)
@@ -451,7 +556,7 @@ def send(device, message: dict) -> None:
 def wait_for_event(detection_id: str, event_name: str, timeout: float) -> dict | None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if mixed_waste_blocked():
+        if mixed_waste_blocked() or station_status.get("manualRecoveryRequired"):
             return None
         try:
             message = workflow_events.get(timeout=min(0.25, max(0.01, deadline - time.monotonic())))
@@ -571,6 +676,9 @@ def camera_preview_loop(camera) -> None:
         rx1, ry1, rx2, ry2 = PLATFORM_ROI
         cv2.rectangle(frame, (int(rx1 * width), int(ry1 * height)), (int(rx2 * width), int(ry2 * height)), (40, 220, 240), 2)
         cv2.putText(frame, "PLATFORM ROI", (int(rx1 * width), max(20, int(ry1 * height) - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40, 220, 240), 2)
+        sx1, sy1, sx2, sy2 = INDUCTIVE_ROI
+        cv2.rectangle(frame, (int(sx1 * width), int(sy1 * height)), (int(sx2 * width), int(sy2 * height)), (220, 80, 220), 2)
+        cv2.putText(frame, "METAL SENSOR", (int(sx1 * width), max(16, int(sy1 * height) - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (220, 80, 220), 1)
         encoded, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         if encoded:
             with frame_lock:
@@ -628,16 +736,22 @@ def vision_loop(model) -> None:
             in_roi = PLATFORM_ROI[0] <= (x1 + x2) / (2 * width) <= PLATFORM_ROI[2] and PLATFORM_ROI[1] <= (y1 + y2) / (2 * height) <= PLATFORM_ROI[3]
             if waste_type and in_roi and confidence >= CONFIDENCE:
                 platform_has_object = True
-            display_detections.append({"className": class_name, "wasteType": waste_type, "confidence": confidence, "inPlatformRoi": in_roi})
+            display_detections.append({"className": class_name, "wasteType": waste_type, "confidence": confidence, "inPlatformRoi": in_roi, "box": normalized_box})
             color = (66, 214, 137) if waste_type and in_roi else (120, 120, 120)
             annotations.append((class_name, confidence, normalized_box, color))
+        remaining, matched, pending, metal_context = associate_metal(accepted_detections, captured_at)
+        if matched is not None:
+            annotations = [("Metal (inductive)" if bounds == matched.box else label, conf, bounds,
+                            (0, 190, 255) if bounds == matched.box else color)
+                           for label, conf, bounds, color in annotations]
+            for item in display_detections:
+                if item.get("box") == matched.box:
+                    item.update(wasteType="Tin Can", className="Metal detected via inductive sensor")
         preview_annotations = (captured_at, annotations)
         monotonic_now = captured_at
-        stable = detector.update(accepted_detections, monotonic_now)
-        station_status["mixedWasteBlocked"] = detector.mixed_blocked
-        update_sensor_interlock(ai_visible=any(item.confidence >= max(0.05, CONFIDENCE * 0.75) and detector._inside_roi(item) for item in accepted_detections))
+        stable = update_camera_stability(detector, remaining, monotonic_now)
         station_status["lastInferenceCapturedAt"] = captured_at
-        if stable and stable.status == "accepted" and not mixed_waste_blocked():
+        if stable and stable.status == "accepted" and not mixed_waste_blocked() and not metal_context and not pending:
             workflow_events.put({
                 "event": "camera_batch", "detectionId": f"camera-{uuid.uuid4()}",
                 "wasteType": stable.waste_type, "itemCount": stable.item_count,
@@ -648,7 +762,7 @@ def vision_loop(model) -> None:
         elif stable and stable.status == "rearmed":
             if not mixed_waste_blocked():
                 publish({"type": "mixed_waste_cleared"})
-            workflow_events.put({"event": "platform_empty"})
+            # Camera clearance must not acknowledge an inductive transaction.
 
         active_detection_id = coordinator.active_detection_id
         platform_clear, should_signal_empty = clear_tracker.update(
@@ -668,7 +782,7 @@ def vision_loop(model) -> None:
         previous = now
         station_status.update(
             visionFps=round(fps, 1), detections=display_detections,
-            scanning=bool(accepted_detections) and not detector.locked,
+            scanning=bool(accepted_detections) and not detector.locked and not station_status.get("manualRecoveryRequired"),
             platformClear=platform_clear,
             lastInferenceAt=time.time(),
         )
@@ -676,6 +790,11 @@ def vision_loop(model) -> None:
 
 def handle_batch(device, batch: dict) -> None:
     detection_id = str(batch["detectionId"])
+    if batch.get("source") == "ai_camera" and station_status.get("inductiveActive"):
+        return  # A queued pre-metal camera classification cannot win the reservation.
+    if station_status.get("manualRecoveryRequired"):
+        publish({"type": "error", "message": station_status["lastError"]})
+        return
     if mixed_waste_blocked():
         if batch.get("source") == "inductive_sensor":
             send(device, {"command": "recover", "detectionId": detection_id})
@@ -704,15 +823,19 @@ def handle_batch(device, batch: dict) -> None:
     publish({"type": "item_detected", **batch, "pointsAvailable": round(POINTS_PER_ITEM[batch["wasteType"]] * item_count)})
 
     prepared = wait_for_event(detection_id, "prepared", SORT_TIMEOUT)
+    if station_status.get("manualRecoveryRequired"):
+        coordinator.clear()
+        return
     prepare_error = "ESP32 could not prepare; no item was counted."
     if prepared and batch.get("source") == "inductive_sensor" and not SIMULATION_MODE:
         # Wait for an image captured after the metal reservation, not an old empty frame.
         capture_after = time.monotonic()
         deadline = capture_after + 8
-        while (not mixed_waste_blocked() and time.monotonic() < deadline
-               and station_status.get("lastInferenceCapturedAt", 0) <= capture_after):
+        while (not mixed_waste_blocked() and not station_status.get("manualRecoveryRequired") and time.monotonic() < deadline
+               and (station_status.get("lastInferenceCapturedAt", 0) <= capture_after
+                    or not station_status.get("metalCheckReady"))):
             time.sleep(0.05)
-        if station_status.get("lastInferenceCapturedAt", 0) <= capture_after:
+        if station_status.get("lastInferenceCapturedAt", 0) <= capture_after or not station_status.get("metalCheckReady"):
             prepared = None
             prepare_error = "Camera check timed out. Remove the items and try again; no item was counted."
     if mixed_waste_blocked():
@@ -734,13 +857,30 @@ def handle_batch(device, batch: dict) -> None:
         set_workflow("IDLE")
         publish({"type": "mixed_waste_rejected", "message": MIXED_WASTE_MESSAGE})
         return
-    set_workflow("SORTING")
+    if station_status.get("manualRecoveryRequired"):
+        coordinator.clear()
+        return
+    with sensor_interlock_lock:
+        # The camera's final mixed-waste check and motion commit must be
+        # atomic. Once committed, changing AI labels cannot cancel the sort.
+        if mixed_waste_blocked():
+            send(device, {"command": "recover", "detectionId": detection_id})
+            coordinator.clear()
+            set_workflow("IDLE")
+            publish({"type": "mixed_waste_rejected", "message": MIXED_WASTE_MESSAGE})
+            return
+        if batch.get("source") == "inductive_sensor":
+            station_status["aiWasteVisible"] = False
+        set_workflow("SORTING")
     send(device, {
         "command": "sort", "detectionId": detection_id, "wasteType": batch["wasteType"],
         "itemCount": item_count, "confidence": batch["confidence"],
         "source": batch.get("source", "ai_camera"),
     })
     result = wait_for_event(detection_id, "sorted", SORT_TIMEOUT)
+    if station_status.get("manualRecoveryRequired"):
+        coordinator.clear()
+        return
     if mixed_waste_blocked():
         send(device, {"command": "recover", "detectionId": detection_id})
         coordinator.clear()
@@ -760,7 +900,7 @@ def handle_batch(device, batch: dict) -> None:
     backend_jobs.put({"kind": "claim", "batch": dict(batch)})
     set_workflow("WAITING_FOR_PLATFORM_EMPTY")
     if SIMULATION_MODE:
-        threading.Timer(0.75, lambda: workflow_events.put({"event": "platform_empty"})).start()
+        threading.Timer(0.75, lambda: workflow_events.put({"event": "platform_empty", "detectionId": detection_id})).start()
 
 
 def workflow_loop(device) -> None:
@@ -771,6 +911,8 @@ def workflow_loop(device) -> None:
 
 
 def process_workflow_event(device, message: dict) -> None:
+    if handle_controller_recovery(message) or station_status.get("manualRecoveryRequired"):
+        return
     event_name = message.get("event")
     detection_id = message.get("detectionId")
     if detection_id in ignored_detection_ids:
@@ -782,6 +924,10 @@ def process_workflow_event(device, message: dict) -> None:
         handle_batch(device, message)
     elif event_name == "platform_empty":
         active_id = coordinator.active_detection_id
+        if not active_id or detection_id != active_id:
+            return
+        if station_status.get("activeSource") == "inductive_sensor" and message.get("source") == "camera_clear":
+            return
         if active_id:
             send(device, {"command": "platform_empty", "detectionId": active_id})
             publish({"type": "platform_empty", "detectionId": active_id})

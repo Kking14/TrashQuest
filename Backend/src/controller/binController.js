@@ -77,7 +77,11 @@ const editBin = async (req, res) => {
  
 const reportFullStatus = async (req, res) => {
     try {
-        const bin = await updateFullStatusFromSensor(req.bin, req.body.isFull);
+        const bin = await updateFullStatusFromSensor(req.bin, req.body.isFull, {
+            binType: req.body.binType,
+            readingValid: req.body.readingValid,
+            distanceCm: req.body.distanceCm,
+        });
         res.status(200).json({
             success: true,
             message: bin.isFull ? 'Bin reported as full' : 'Bin reported as available',
@@ -85,6 +89,7 @@ const reportFullStatus = async (req, res) => {
                 _id: bin._id,
                 code: bin.code,
                 isFull: bin.isFull,
+                compartments: bin.compartments,
                 status: bin.status,
                 lastSensorUpdateAt: bin.lastSensorUpdateAt,
                 fullnessChangedAt: bin.fullnessChangedAt,

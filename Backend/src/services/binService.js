@@ -1,5 +1,6 @@
 import Bin from '../models/binModel.js';
 import crypto from 'crypto';
+import { applyFullnessReading } from '../utils/binFullness.js';
  
 const createBin = async (binData) => {
     const existing = await Bin.findOne({ code: binData.code });
@@ -51,17 +52,25 @@ const updateBin = async (binID, updateData) => {
     return bin;
 };
  
-const updateFullStatusFromSensor = async (bin, isFull) => {
+const updateFullStatusFromSensor = async (bin, isFull, reading = {}) => {
     if (typeof isFull !== 'boolean') {
         throw new Error('isFull must be true or false');
     }
     if (bin.status === 'inactive') {
         throw new Error('This bin is currently inactive');
     }
-    const fullnessChanged = bin.isFull !== isFull;
-    bin.isFull = isFull;
-    bin.status = isFull ? 'needs_collection' : 'active';
-    bin.lastSensorUpdateAt = new Date();
+    const now = new Date();
+    const current = bin.toObject().compartments || {};
+    // Existing single-sensor records refer to the plastic compartment.
+    if (!current.plastic?.updatedAt && !current.metal?.updatedAt && bin.isFull) {
+        current.plastic = { ...current.plastic, isFull: true };
+    }
+    const result = applyFullnessReading(current, { ...reading, isFull }, now);
+    const fullnessChanged = bin.isFull !== result.isFull || result.changed;
+    bin.compartments = result.compartments;
+    bin.isFull = result.isFull;
+    bin.status = result.isFull ? 'needs_collection' : 'active';
+    bin.lastSensorUpdateAt = now;
     if (fullnessChanged || !bin.fullnessChangedAt) {
         bin.fullnessChangedAt = bin.lastSensorUpdateAt;
     }

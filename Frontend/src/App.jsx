@@ -1,6 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import QrScanner from 'qr-scanner';
+import { compartmentNames, compartmentStatus, fullBinDescription } from './binFullness';
+
+function BinFullnessIndicators({ compartments }) {
+  return <div className="compartment-readings">{Object.entries(compartmentNames).map(([key, name]) => {
+    const status = compartmentStatus(compartments?.[key]);
+    return <div key={key} className={`compartment-reading ${status.full ? 'is-full' : status.fresh ? 'is-available' : 'is-unknown'}`}>
+      <strong>{name}</strong>
+      <span>{status.label}</span>
+      <small>{status.detail}</small>
+    </div>;
+  })}</div>;
+}
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 const BIN_DASHBOARD_PASSWORD = import.meta.env.VITE_BIN_DASHBOARD_PASSWORD || 'admin123';
@@ -17,7 +29,7 @@ const kioskIdleSlides = [
     eyebrow: 'Step 1 · Place waste',
     icon: '📄',
     title: 'One waste type at a time.',
-    description: 'Place paper or crushed plastic bottles on the platform. Tin cans go one at a time.',
+    description: 'Place paper or plastic bottles on the platform. Tin cans go one at a time.',
   },
   {
     eyebrow: 'Step 2 · Let it sort',
@@ -193,7 +205,7 @@ function App() {
           if (isFull && previous?.changeMarker && previous.changeMarker !== changeMarker) {
             showToast({
               title: 'Bin full — collection needed',
-              message: `${bin.code}${bin.location ? ` at ${bin.location}` : ''} has reached full capacity.`,
+              message: `${bin.code}${bin.location ? ` at ${bin.location}` : ''}: ${fullBinDescription(bin)}.`,
               tone: 'error',
               duration: 12000,
             });
@@ -600,13 +612,29 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
 }
 
 function BinDisplayDashboard({ onExit }) {
+  const pendingClaimsStorageKey = 'trashquest_kiosk_pending_claims';
+  const sessionQrStorageKey = 'trashquest_kiosk_session_qr';
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [password, setPassword] = useState('');
   const [deviceKey, setDeviceKey] = useState(() => localStorage.getItem('trashquest_bin_device_key') || '');
-  const [items, setItems] = useState([]);
+  const [items, setItems] = useState(() => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(pendingClaimsStorageKey) || '[]');
+      return Array.isArray(saved) ? saved.filter((item) => item?.id && item?.claimToken && item?.wasteType) : [];
+    } catch {
+      return [];
+    }
+  });
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
-  const [claim, setClaim] = useState(null);
+  const [claim, setClaim] = useState(() => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(sessionQrStorageKey) || 'null');
+      return saved?.expiresAt && new Date(saved.expiresAt) > new Date() ? saved : null;
+    } catch {
+      return null;
+    }
+  });
   const [displayState, setDisplayState] = useState('ready');
   const [idleVisible, setIdleVisible] = useState(false);
   const [idlePreview, setIdlePreview] = useState(false);
@@ -628,6 +656,16 @@ function BinDisplayDashboard({ onExit }) {
   const [gatewayPlatformClear, setGatewayPlatformClear] = useState(false);
   const detectionTimer = useRef(null);
   const gatewaySequence = useRef(null);
+
+  useEffect(() => {
+    if (items.length > 0) sessionStorage.setItem(pendingClaimsStorageKey, JSON.stringify(items));
+    else sessionStorage.removeItem(pendingClaimsStorageKey);
+  }, [items]);
+
+  useEffect(() => {
+    if (claim) sessionStorage.setItem(sessionQrStorageKey, JSON.stringify(claim));
+    else sessionStorage.removeItem(sessionQrStorageKey);
+  }, [claim]);
 
   const totalItems = items.reduce((sum, item) => sum + (item.itemCount || 1), 0);
   const groupedItems = binWasteOptions.map((option) => ({
@@ -713,6 +751,10 @@ function BinDisplayDashboard({ onExit }) {
           });
           if (status.scanning && displayState === 'ready') setDisplayState('detecting');
           if (!status.scanning && displayState === 'detecting' && !detectedItem) setDisplayState('ready');
+          if (status.manualRecoveryRequired) {
+            setNotice(status.lastError || 'Sorting locked. Please ask the operator to check the mechanism.');
+            setDisplayState('waiting-empty');
+          }
         }
         const response = await fetch(
           `http://127.0.0.1:8765/events?after=${gatewaySequence.current ?? 0}`,
@@ -745,6 +787,10 @@ function BinDisplayDashboard({ onExit }) {
             setNotice(event.message);
           } else if (event.type === 'mixed_waste_cleared') {
             setNotice((current) => current.startsWith('Two different waste types detected.') ? 'Platform cleared. Please place only one waste type at a time.' : current);
+          } else if (event.type === 'recovery_cleared') {
+            setDetectedItem(null);
+            setDisplayState('ready');
+            setNotice(event.message);
           } else if (event.type === 'error') {
             setNotice(event.message || 'The station could not record this item.');
             if (event.detectionId) {
@@ -778,7 +824,7 @@ function BinDisplayDashboard({ onExit }) {
     const detectedId = hardwareData?.detectionId || crypto.randomUUID();
     setClaim(null);
     setPlatformCleared(false);
-    setNotice('');
+    setNotice(hardwareData?.source === 'inductive_sensor' ? 'Metal detected via inductive sensor.' : '');
     setDetectedItem({
       ...option, id: detectedId, itemCount,
       pointsAvailable: hardwareData?.pointsAvailable ?? 0,
@@ -863,7 +909,15 @@ function BinDisplayDashboard({ onExit }) {
       localStorage.removeItem('trashquest_bin_device_key');
     }
     setDeviceKey(normalizedDeviceKey);
-    clearSession();
+    if (claim) {
+      setDisplayState('qr');
+      setNotice('Recovered your session QR. Ask the resident to scan it.');
+    } else if (items.length > 0) {
+      setDisplayState('waiting-empty');
+      setNotice('Recovered sorted disposals. Choose Done to show the QR for available claims.');
+    } else {
+      clearSession();
+    }
     gatewaySequence.current = null;
     setLastKioskInteraction((count) => count + 1);
     setIsUnlocked(true);
@@ -962,6 +1016,9 @@ function BinDisplayDashboard({ onExit }) {
       }
 
       let sessionCode;
+      let sessionExpiresAt;
+      let claimableClaims = claims;
+      let skippedClaimCount = 0;
       if (activeDeviceKey) {
         const sessionResponse = await apiRequest('/api/disposals/sessions', {
           method: 'POST',
@@ -969,8 +1026,13 @@ function BinDisplayDashboard({ onExit }) {
           body: { claimTokens: claims.map((entry) => entry.claimToken) },
         });
         sessionCode = sessionResponse.data.sessionCode;
+        sessionExpiresAt = sessionResponse.data.expiresAt;
+        const acceptedTokens = new Set(sessionResponse.data.claimTokens || []);
+        claimableClaims = claims.filter((entry) => acceptedTokens.has(entry.claimToken));
+        skippedClaimCount = sessionResponse.data.skippedClaimCount || 0;
       } else {
         sessionCode = `TQ-TEST${Math.floor(10 + Math.random() * 90)}`;
+        sessionExpiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
       }
       const sessionValue = JSON.stringify({
         type: 'trashquest-session',
@@ -984,15 +1046,19 @@ function BinDisplayDashboard({ onExit }) {
         color: { dark: '#10221c', light: '#ffffff' },
       });
       setClaim({
-        claims,
+        claims: claimableClaims,
         qrImage,
         sessionCode,
+        expiresAt: sessionExpiresAt,
         testMode: !activeDeviceKey,
-        totalItems: claims.reduce((sum, entry) => sum + entry.itemCount, 0),
-        totalPoints: claims.reduce((sum, entry) => sum + entry.pointsAvailable, 0),
+        skippedClaimCount,
+        totalItems: claimableClaims.reduce((sum, entry) => sum + entry.itemCount, 0),
+        totalPoints: claimableClaims.reduce((sum, entry) => sum + entry.pointsAvailable, 0),
       });
       setItems([]);
-      setNotice('Session QR code ready. Ask the resident to scan it once.');
+      setNotice(skippedClaimCount
+        ? `QR ready for the available disposals. ${skippedClaimCount} earlier claim${skippedClaimCount === 1 ? ' was' : 's were'} unavailable and cannot earn points.`
+        : 'Session QR code ready. Ask the resident to scan it once.');
     } catch (error) {
       setNotice(error.message);
       setDisplayState('qr');
@@ -1042,7 +1108,7 @@ function BinDisplayDashboard({ onExit }) {
   }
 
   return (
-    <main className={`bin-display-shell kiosk-state-${displayState}`} onPointerDownCapture={wakeKiosk} onKeyDownCapture={wakeKiosk}>
+    <main className={`bin-display-shell kiosk-state-${displayState}${displayState === 'ready' && notice ? ' has-ready-notice' : ''}`} onPointerDownCapture={wakeKiosk} onKeyDownCapture={wakeKiosk}>
       <header className="kiosk-header">
         <div className="kiosk-brand"><span>TQ</span><strong>TrashQuest</strong></div>
         <div className="station-status"><i /> {gatewayOnline ? 'Hardware connected' : 'Test mode'}</div>
@@ -1051,6 +1117,13 @@ function BinDisplayDashboard({ onExit }) {
           <button type="button" className="kiosk-exit" onClick={exitDisplay}>Exit display</button>
         </div>
       </header>
+
+      {displayState === 'ready' && notice && (
+        <div className="kiosk-ready-alert" role="alert">
+          <strong>Station notice</strong>
+          <span>{notice}</span>
+        </div>
+      )}
 
       <aside className={`ai-camera-panel ${cameraVisible ? 'is-open' : 'is-closed'}`}>
         <div className="ai-camera-heading">
@@ -1108,12 +1181,6 @@ function BinDisplayDashboard({ onExit }) {
             <p className="kiosk-kicker">Smart waste station</p>
             <h1>{binFull ? 'Bin temporarily unavailable' : 'Place paper or plastic bottles on the platform'}</h1>
             <p>{binFull ? 'This bin is full and needs collection.' : 'Place one waste type at a time. The AI counts visible papers or bottles and sorts the batch automatically. Tin cans go one at a time. Paper: 5 points · Plastic: 10 points · Tin can: 15 points.'}</p>
-            {!binFull && (
-              <div className="plastic-crush-notice">
-                Please crush plastic bottles before placing them on the platform.
-              </div>
-            )}
-            {notice && <div className="kiosk-correction-notice" role="alert">{notice}</div>}
           </div>
         )}
 
@@ -1194,6 +1261,11 @@ function BinDisplayDashboard({ onExit }) {
             )}
             {claim?.claims?.length > 0 && (
               <>
+                {claim.skippedClaimCount > 0 && (
+                  <p className="kiosk-error">
+                    {claim.skippedClaimCount} earlier disposal claim{claim.skippedClaimCount === 1 ? ' was' : 's were'} unavailable. This QR includes only the claimable items shown below.
+                  </p>
+                )}
                 <div className="kiosk-qr-list single-session-qr">
                   <article>
                     <img src={claim.qrImage} alt="QR code for this disposal session" />
@@ -1526,7 +1598,8 @@ function ResidentScan({ token, runAction, onViewPoints }) {
       stopCamera();
       setScannerState('claimed');
       const pointsClaimed = result.data?.totalPoints ?? result.data?.pointsAwarded ?? 0;
-      setScannerMessage(`Session claimed. You earned ${pointsClaimed} ${pointsClaimed === 1 ? 'point' : 'points'}.`);
+      const skipped = result.data?.skippedClaimCount || 0;
+      setScannerMessage(`Session claimed. You earned ${pointsClaimed} ${pointsClaimed === 1 ? 'point' : 'points'}.${skipped ? ` ${skipped} expired or unavailable claim${skipped === 1 ? ' was' : 's were'} skipped.` : ''}`);
     }
     return result;
   }
@@ -1786,12 +1859,20 @@ function AdminApp({ data, loading, logout, notice, refreshData, runAction, sessi
             <span aria-hidden="true">!</span>
             <div>
               <strong>{fullBins.length} smart {fullBins.length === 1 ? 'bin requires' : 'bins require'} collection</strong>
-              <p>{fullBins.map((bin) => `${bin.code}${bin.location ? ` — ${bin.location}` : ''}`).join(', ')}</p>
+              <p>{fullBins.map((bin) => `${bin.code}: ${fullBinDescription(bin)}${bin.location ? ` — ${bin.location}` : ''}`).join('; ')}</p>
             </div>
             <button type="button" onClick={() => setView('admin-bins')}>View bins</button>
           </section>
         )}
-        {view === 'admin-overview' && <AdminOverview data={data} token={token} loading={loading} />}
+        {view === 'admin-overview' && <>
+          <section className="compartment-overview" aria-label="Bin fullness monitoring">
+            {data.bins.map((bin) => <div key={bin._id}>
+              <h3>{bin.code}{bin.location ? ` — ${bin.location}` : ''}</h3>
+              <BinFullnessIndicators compartments={bin.compartments} />
+            </div>)}
+          </section>
+          <AdminOverview data={data} token={token} loading={loading} />
+        </>}
         {view === 'admin-bins' && <AdminBinTools data={data} token={token} runAction={runAction} loading={loading} />}
         {view === 'admin-quests' && <AdminQuestTools quests={data.quests} token={token} runAction={runAction} loading={loading} />}
         {view === 'admin-rewards' && <AdminRewardTools rewards={data.rewards} token={token} runAction={runAction} loading={loading} />}
@@ -2047,9 +2128,7 @@ function AdminBinTools({ data, token, runAction, loading }) {
                   <td>{bin.location || 'Unassigned'}</td>
                   <td>
                     <div className="bin-capacity-state">
-                      <span className={(bin.isFull || bin.status === 'needs_collection') ? 'capacity-full' : 'capacity-ok'}>
-                        {(bin.isFull || bin.status === 'needs_collection') ? 'Full' : 'Available'}
-                      </span>
+                      <BinFullnessIndicators compartments={bin.compartments} />
                       <small>{bin.lastSensorUpdateAt ? `Sensor updated ${formatDate(bin.lastSensorUpdateAt)}` : 'Waiting for sensor report'}</small>
                     </div>
                   </td>
