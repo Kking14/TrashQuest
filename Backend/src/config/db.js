@@ -6,14 +6,22 @@ dns.setServers([
     '8.8.8.8'
 ])
 
+let connectionPromise;
+
 export const connectDB = async () => {
-    try {
+    if (mongoose.connection.readyState === 1) return mongoose.connection;
+    if (!connectionPromise) {
         mongoose.set('sanitizeFilter', true);
         mongoose.set('strictQuery', true);
-        await mongoose.connect(process.env.MONGO_URI);
-        console.log("MongoDB connected successfully");
-    } catch (error) {
-        console.error("MongoDB connection error:", error);
-        process.exit(1);
+        connectionPromise = mongoose.connect(process.env.MONGO_URI)
+            .then(() => {
+                console.log("MongoDB connected successfully");
+                return mongoose.connection;
+            })
+            .catch((error) => {
+                connectionPromise = undefined;
+                throw error;
+            });
     }
-}
+    return connectionPromise;
+};

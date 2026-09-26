@@ -20,12 +20,39 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
  
 const app = express();
 app.disable("x-powered-by");
- 
-connectDB();
+
+const allowedOrigins = new Set((process.env.FRONTEND_ORIGINS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean));
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Device-Key");
+    if (req.method === "OPTIONS") return res.sendStatus(204);
+  }
+  if (origin && req.method === "OPTIONS") return res.sendStatus(403);
+  next();
+});
+
+app.use("/api", async (req, res, next) => {
+  try {
+    await connectDB();
+    next();
+  } catch (error) {
+    console.error("MongoDB connection error:", error);
+    res.status(503).json({ success: false, message: "Database unavailable" });
+  }
+});
  
 app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(express.json({ limit: "32kb", strict: true }));
 app.use("/api", generalApiLimiter);
+app.get("/api/health", (req, res) => res.json({ success: true }));
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/bins", binRoutes);
@@ -44,6 +71,10 @@ app.use((error, req, res, next) => {
   return next(error);
 });
  
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+  });
+}
+
+export default app;
