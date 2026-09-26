@@ -19,7 +19,7 @@ class BinFullnessTests(unittest.TestCase):
                                          'readingValid': valid, 'distanceCm': 5 if full else 30})
 
     def test_either_full_blocks_all_sorting_and_other_empty_does_not_clear_it(self):
-        for name, other in [('metal', 'plastic'), ('plastic', 'metal')]:
+        for name, other in [('metal', 'plastic'), ('plastic', 'metal'), ('paper', 'plastic')]:
             gateway.station_status['binCompartments'] = {}
             self.report(name, True)
             self.report(other, False)
@@ -37,7 +37,7 @@ class BinFullnessTests(unittest.TestCase):
         self.assertFalse(gateway.station_status['binCompartments']['metal']['readingValid'])
 
     def test_invalid_bin_does_not_change_states(self):
-        self.assertFalse(self.report('paper', False))
+        self.assertFalse(self.report('glass', False))
         self.assertEqual(gateway.station_status['binCompartments'], {})
 
     def test_old_backend_response_cannot_clear_newer_full_reading(self):

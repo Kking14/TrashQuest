@@ -62,7 +62,7 @@ const updateFullStatusFromSensor = async (bin, isFull, reading = {}) => {
     const now = new Date();
     const current = bin.toObject().compartments || {};
     // Existing single-sensor records refer to the plastic compartment.
-    if (!current.plastic?.updatedAt && !current.metal?.updatedAt && bin.isFull) {
+    if (!current.plastic?.updatedAt && !current.metal?.updatedAt && !current.paper?.updatedAt && bin.isFull) {
         current.plastic = { ...current.plastic, isFull: true };
     }
     const result = applyFullnessReading(current, { ...reading, isFull }, now);

@@ -1,4 +1,4 @@
-export const compartmentNames = { plastic: 'Plastic bin', metal: 'Metal bin' };
+export const compartmentNames = { plastic: 'Plastic bin', metal: 'Metal bin', paper: 'Paper bin' };
 
 export function compartmentStatus(reading, now = Date.now()) {
   const updated = typeof reading?.updatedAt === 'number'

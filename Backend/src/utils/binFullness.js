@@ -1,8 +1,8 @@
-export const BIN_TYPES = ['plastic', 'metal'];
+export const BIN_TYPES = ['plastic', 'metal', 'paper'];
 
 export function applyFullnessReading(current, reading, now = new Date()) {
     const { binType = 'plastic', isFull, readingValid = true, distanceCm = null } = reading;
-    if (!BIN_TYPES.includes(binType)) throw new Error('binType must be plastic or metal');
+    if (!BIN_TYPES.includes(binType)) throw new Error('binType must be plastic, metal or paper');
     if (typeof isFull !== 'boolean' || typeof readingValid !== 'boolean') {
         throw new Error('isFull and readingValid must be true or false');
     }

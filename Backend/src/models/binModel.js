@@ -36,6 +36,7 @@ const binSchema = new mongoose.Schema({
     compartments: {
         plastic: { type: compartmentSchema, default: () => ({}) },
         metal: { type: compartmentSchema, default: () => ({}) },
+        paper: { type: compartmentSchema, default: () => ({}) },
     },
     lastDisposalAt: {
         type: Date,

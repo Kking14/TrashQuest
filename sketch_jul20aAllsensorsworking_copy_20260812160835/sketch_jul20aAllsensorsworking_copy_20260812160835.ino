@@ -11,6 +11,7 @@ const int trigPin = 27;       // plastic-bin ultrasonic
 const int echoPin = 14;       // each ECHO needs its own 5 V-to-3.3 V divider
 const int metalTrigPin = 16;
 const int metalEchoPin = 34;
+const int paperSharpPin = 35; // Sharp GP2Y0A21 analog Vo through a 1:2 voltage divider
 
 const int stepsPerRevolution = 200;
 const int sortingAngleDegrees = 180;
@@ -39,8 +40,9 @@ const unsigned long inductiveEmptyDebounceMs = 2000;
 
 const float plasticFullDistanceCm = 10.0;
 const float metalFullDistanceCm = 10.0;
+const float paperFullDistanceCm = 20.0; // calibrate for the paper-bin mounting height
 const int fullnessConfirms = 3;
-const unsigned long fullnessSampleIntervalMs = 500;  // alternate bins; each sampled once per second
+const unsigned long fullnessSampleIntervalMs = 500;  // rotate through three bins; each sampled every 1.5 seconds
 const unsigned long fullnessHeartbeatMs = 10000;
 const unsigned long ultrasonicTimeoutUs = 25000;
 
@@ -117,9 +119,10 @@ struct BinFullness {
   int fullCount = 0;
   int availableCount = 0;
 };
-BinFullness fullnessSensors[2] = {
+BinFullness fullnessSensors[3] = {
   {"plastic", trigPin, echoPin, plasticFullDistanceCm},
-  {"metal", metalTrigPin, metalEchoPin, metalFullDistanceCm}
+  {"metal", metalTrigPin, metalEchoPin, metalFullDistanceCm},
+  {"paper", -1, paperSharpPin, paperFullDistanceCm}
 };
 int nextFullnessSensor = 0;
 
@@ -481,15 +484,33 @@ void updateFullness() {
   if (now - lastFullnessSampleAt < fullnessSampleIntervalMs) return;
   lastFullnessSampleAt = now;
   BinFullness &sensor = fullnessSensors[nextFullnessSensor];
-  nextFullnessSensor = (nextFullnessSensor + 1) % 2;
-  digitalWrite(sensor.trig, LOW);
-  delayMicroseconds(2);
-  digitalWrite(sensor.trig, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(sensor.trig, LOW);
-  unsigned long duration = pulseIn(sensor.echo, HIGH, ultrasonicTimeoutUs);
-  float distanceCm = duration * 0.0343 / 2.0;
-  bool valid = duration > 0 && distanceCm >= 1.0 && distanceCm <= 400.0;
+  nextFullnessSensor = (nextFullnessSensor + 1) % 3;
+  float distanceCm = 0;
+  bool valid = false;
+  if (sensor.trig < 0) {
+    // GP2Y0A21 is analog, not an ultrasonic echo. The divider halves Vo:
+    // 10k from Vo to GPIO35, 10k from GPIO35 to GND. Estimate distance from
+    // Sharp's 10 cm (~2.3 V) and 80 cm (~0.4 V) reference points. Mount so
+    // both empty and full paper levels stay in the sensor's 10-80 cm range.
+    float sensorMv = analogReadMilliVolts(sensor.echo) * 2.0f;
+    if (sensorMv >= 300.0f && sensorMv <= 3000.0f) {
+      float fraction = (sensorMv - 400.0f) / 1900.0f;
+      float inverseDistance = (1.0f / 80.0f) + fraction * ((1.0f / 10.0f) - (1.0f / 80.0f));
+      if (inverseDistance > 0) {
+        distanceCm = 1.0f / inverseDistance;
+        valid = distanceCm >= 10.0f && distanceCm <= 80.0f;
+      }
+    }
+  } else {
+    digitalWrite(sensor.trig, LOW);
+    delayMicroseconds(2);
+    digitalWrite(sensor.trig, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(sensor.trig, LOW);
+    unsigned long duration = pulseIn(sensor.echo, HIGH, ultrasonicTimeoutUs);
+    distanceCm = duration * 0.0343 / 2.0;
+    valid = duration > 0 && distanceCm >= 1.0 && distanceCm <= 400.0;
+  }
   bool oldFull = sensor.isFull;
   bool oldValid = sensor.readingValid;
   if (!valid) {
@@ -510,7 +531,7 @@ void updateFullness() {
       sensor.readingValid = true;
     }
   }
-  binFull = fullnessSensors[0].isFull || fullnessSensors[1].isFull;
+  binFull = fullnessSensors[0].isFull || fullnessSensors[1].isFull || fullnessSensors[2].isFull;
   bool shouldReport = !sensor.hasReport || oldFull != sensor.isFull || oldValid != sensor.readingValid
       || now - sensor.lastReportAt >= fullnessHeartbeatMs;
   if (!shouldReport) return;
@@ -564,6 +585,8 @@ void setup() {
   pinMode(echoPin, INPUT);
   pinMode(metalTrigPin, OUTPUT);
   pinMode(metalEchoPin, INPUT);
+  pinMode(paperSharpPin, INPUT);
+  analogSetPinAttenuation(paperSharpPin, ADC_11db);
   digitalWrite(metalTrigPin, LOW);
   digitalWrite(dirPin, LOW);
   digitalWrite(pulPin, LOW);
