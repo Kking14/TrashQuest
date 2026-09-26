@@ -280,7 +280,7 @@ function App() {
   }
 
   function showToast({ title, message, tone = 'success', duration = 5000 }) {
-    const id = crypto.randomUUID();
+    const id = globalThis.crypto?.randomUUID?.() ?? `toast-${Date.now()}-${Math.random()}`;
     setToasts((current) => [...current.slice(-3), { id, title, message, tone }]);
     const timer = window.setTimeout(() => dismissToast(id), duration);
     toastTimers.current.set(id, timer);
@@ -821,7 +821,7 @@ function BinDisplayDashboard({ onExit }) {
     if (!['ready', 'detecting'].includes(displayState)) return;
     const option = binWasteOptions.find((entry) => entry.value === wasteType);
     const itemCount = Math.max(1, Math.round(Number(detectedCount) || 1));
-    const detectedId = hardwareData?.detectionId || crypto.randomUUID();
+    const detectedId = hardwareData?.detectionId || globalThis.crypto?.randomUUID?.() || `detected-${Date.now()}-${Math.random()}`;
     setClaim(null);
     setPlatformCleared(false);
     setNotice(hardwareData?.source === 'inductive_sensor' ? 'Metal detected via inductive sensor.' : '');
@@ -2043,8 +2043,12 @@ function AdminBinTools({ data, token, runAction, loading }) {
 
   async function copyDeviceKey() {
     if (!createdKey?.value) return;
-    await navigator.clipboard.writeText(createdKey.value);
-    setKeyCopied(true);
+    try {
+      await navigator.clipboard.writeText(createdKey.value);
+      setKeyCopied(true);
+    } catch {
+      setKeyCopied(false);
+    }
   }
 
   return (
@@ -2089,7 +2093,7 @@ function AdminBinTools({ data, token, runAction, loading }) {
             </button>
           </div>
           <p className="device-key-warning">
-            Paste this key only into the matching bin display. Keep it private because it authorizes that station.
+            Paste this key only into the matching bin display. If copying is blocked, select the key above and copy it manually. Keep it private because it authorizes that station.
           </p>
         </section>
       )}
