@@ -293,3 +293,20 @@ only the latest captured frame, preventing a backlog when inference is slower.
 and computer. The display reports preview FPS and AI FPS separately. Detection
 boxes update at AI speed and disappear when older than one second. Counting,
 classification thresholds, and sorting still depend on AI results.
+
+## Metal association and two bin sensors
+
+The inductive sensor identifies metal. The gateway matches one AI box covering the sensor and labels that object "Metal detected via inductive sensor". Additional visible objects still block sorting; ambiguous matches also block. The match is held through the active metal transaction using box overlap. This does not retrain the model or guarantee detection of hidden/overlapping objects.
+
+Set `TQ_INDUCTIVE_ROI=0.53,0.41,0.59,0.49` in `.env.station` if calibration is needed (this is also the default). Coordinates are normalized against the full camera frame, not the platform ROI. The purple METAL SENSOR rectangle should surround the blue sensor. Recalibrate if the camera moves. Let the camera run before placing one can over the sensor. Confirm the overlay, then test a can beside paper/plastic: sorting must stay blocked.
+
+| Compartment | TRIG | ECHO | Full threshold |
+| --- | --- | --- | --- |
+| Plastic | GPIO 27 | GPIO 14 | 10 cm |
+| Metal | GPIO 16 | GPIO 34 | 10 cm |
+
+Each ECHO requires its own voltage divider and all sensors share ground. Thresholds are separate firmware constants (`plasticFullDistanceCm`, `metalFullDistanceCm`). Sensors alternate every 500 ms, require three confirming readings, and defer measurement while the stepper is moving. Reports include `binType`, `isFull`, `readingValid`, and `distanceCm`, with a heartbeat every 10 seconds.
+
+Either confirmed full compartment blocks the whole station. Admin Overview and Bins show Plastic and Metal separately and name the full compartment. Missing, invalid, or over-30-second-old readings display as unavailable. A timeout never clears a previously confirmed full state; a valid empty reading must clear it. Ultrasonic distance describes clearance below the sensor, not a calibrated percentage.
+
+After installing these changes, restart backend, frontend, and gateway and upload the updated ESP32 sketch. Check each sensor independently: fill metal while plastic stays empty, then reverse, and unplug one sensor to check unavailable reporting. No model retraining or dependency installation is required by this change.

@@ -8,7 +8,7 @@ import User from '../models/userModel.js';
 import { calculatePoints } from './pointsService.js';
 import { updateQuestProgress } from './questService.js';
  
-const CLAIM_EXPIRY_MINUTES = 3;
+const CLAIM_EXPIRY_MINUTES = 15;
  
 const SESSION_CODE_CHARACTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
@@ -20,6 +20,18 @@ const generateSessionCode = () => {
     return code;
 };
 
+const selectAvailableClaims = (claimTokens, claims, now = new Date()) => {
+    const uniqueTokens = [...new Set(claimTokens || [])];
+    const byToken = new Map(claims.map((claim) => [claim.claimToken, claim]));
+    const availableClaims = uniqueTokens
+        .map((token) => byToken.get(token))
+        .filter((claim) => claim?.status === 'pending' && claim.expiresAt > now);
+    return {
+        availableClaims,
+        skippedClaimCount: uniqueTokens.length - availableClaims.length,
+    };
+};
+
 const createDisposalSession = async (bin, claimTokens) => {
     const uniqueTokens = [...new Set(claimTokens || [])];
     if (uniqueTokens.length === 0) {
@@ -29,12 +41,9 @@ const createDisposalSession = async (bin, claimTokens) => {
         claimToken: mongoose.trusted({ $in: uniqueTokens }),
         bin: bin._id,
     });
-    if (claims.length !== uniqueTokens.length) {
-        throw new Error('One or more disposal claims do not belong to this bin');
-    }
-    if (claims.some((claim) => claim.status !== 'pending' || claim.expiresAt < new Date())) {
-        throw new Error('One or more disposal claims are no longer available');
-    }
+    const { availableClaims, skippedClaimCount } = selectAvailableClaims(uniqueTokens, claims);
+    if (availableClaims.length === 0) throw new Error('No disposal claims are still available');
+    const availableTokens = availableClaims.map((claim) => claim.claimToken);
 
     let session;
     for (let attempt = 0; attempt < 5 && !session; attempt += 1) {
@@ -42,23 +51,36 @@ const createDisposalSession = async (bin, claimTokens) => {
             session = await DisposalSession.create({
                 bin: bin._id,
                 code: generateSessionCode(),
-                claimTokens: uniqueTokens,
-                itemCount: claims.reduce((sum, claim) => sum + (claim.itemCount || 1), 0),
-                expiresAt: new Date(Math.min(...claims.map((claim) => claim.expiresAt.getTime()))),
+                claimTokens: availableTokens,
+                itemCount: availableClaims.reduce((sum, claim) => sum + (claim.itemCount || 1), 0),
+                // The session remains redeemable while any included claim is valid.
+                expiresAt: new Date(Math.max(...availableClaims.map((claim) => claim.expiresAt.getTime()))),
             });
         } catch (error) {
             if (error.code !== 11000) throw error;
         }
     }
     if (!session) throw new Error('Could not create a unique session code');
-    return session;
+    return { session, skippedClaimCount };
 };
 
 const getDisposalSessionTokens = async (sessionCode, userID) => {
     const code = sessionCode.trim().toUpperCase();
     const claimedAt = new Date();
+    const candidate = await DisposalSession.findOne({ code, status: 'available' });
+    if (candidate) {
+        // Older sessions used the first claim's expiry. A later successful
+        // claim can still be valid, even if that session timestamp has passed.
+        const availableClaim = await DisposalClaim.findOne({
+            claimToken: mongoose.trusted({ $in: candidate.claimTokens }),
+            bin: candidate.bin,
+            status: 'pending',
+            expiresAt: mongoose.trusted({ $gt: claimedAt }),
+        }).select('_id').lean();
+        if (!availableClaim) throw new Error('This session code has expired');
+    }
     const session = await DisposalSession.findOneAndUpdate(
-        { code, status: 'available', expiresAt: mongoose.trusted({ $gt: claimedAt }) },
+        { code, status: 'available', ...(candidate ? {} : { expiresAt: mongoose.trusted({ $gt: claimedAt }) }) },
         { $set: { status: 'claimed', claimedBy: userID, claimedAt } },
         { new: true }
     );
@@ -271,4 +293,4 @@ const getAllDisposals = async (filters = {}) => {
     return disposals;
 };
  
-export { createDisposalClaim, createDisposalSession, getDisposalSessionTokens, claimDisposal, getUserDisposals, getAllDisposals };
+export { createDisposalClaim, createDisposalSession, getDisposalSessionTokens, claimDisposal, getUserDisposals, getAllDisposals, selectAvailableClaims };

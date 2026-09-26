@@ -1,5 +1,12 @@
 import mongoose from 'mongoose';
 import crypto from 'crypto';
+
+const compartmentSchema = new mongoose.Schema({
+    isFull: { type: Boolean, default: false },
+    readingValid: { type: Boolean, default: false },
+    distanceCm: { type: Number, default: null },
+    updatedAt: { type: Date, default: null },
+}, { _id: false });
  
 const binSchema = new mongoose.Schema({
     code: {
@@ -25,6 +32,10 @@ const binSchema = new mongoose.Schema({
     isFull: {
         type: Boolean,
         default: false,
+    },
+    compartments: {
+        plastic: { type: compartmentSchema, default: () => ({}) },
+        metal: { type: compartmentSchema, default: () => ({}) },
     },
     lastDisposalAt: {
         type: Date,

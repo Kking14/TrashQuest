@@ -7,8 +7,10 @@ const int inductivePin = 26;  // active-low NPN tin-can sensor
 const int dirPin = 32;
 const int pulPin = 33;
 const int servoPin = 25;
-const int trigPin = 27;       // ultrasonic fullness only
-const int echoPin = 14;       // use a 5 V-to-3.3 V divider
+const int trigPin = 27;       // plastic-bin ultrasonic
+const int echoPin = 14;       // each ECHO needs its own 5 V-to-3.3 V divider
+const int metalTrigPin = 16;
+const int metalEchoPin = 34;
 
 const int stepsPerRevolution = 200;
 const int sortingAngleDegrees = 180;
@@ -23,7 +25,7 @@ const int servoPwmFrequencyHz = 50;
 const int servoPwmResolutionBits = 16;
 const unsigned long servoStepIntervalMs = 1;
 const unsigned long gateOpenHoldMs = 3000;
-const unsigned long homeHoldMs = 3000;
+const unsigned long homeHoldMs = 750;  // allow the physical servo to settle before rotating home
 const bool metalDirection = HIGH;
 const bool plasticDirection = LOW;
 
@@ -33,12 +35,13 @@ const unsigned long motorTimeoutMs = 30000;
 const unsigned long platformEmptyTimeoutMs = 120000;
 const unsigned long partialJsonTimeoutMs = 300;
 const unsigned long inductiveDebounceMs = 150;
-const unsigned long inductiveEmptyDebounceMs = 350;
+const unsigned long inductiveEmptyDebounceMs = 2000;
 
-const float fullDistanceCm = 10.0;
+const float plasticFullDistanceCm = 10.0;
+const float metalFullDistanceCm = 10.0;
 const int fullnessConfirms = 3;
-const unsigned long fullnessSampleIntervalMs = 1000;
-const unsigned long fullnessHeartbeatMs = 60000;
+const unsigned long fullnessSampleIntervalMs = 500;  // alternate bins; each sampled once per second
+const unsigned long fullnessHeartbeatMs = 10000;
 const unsigned long ultrasonicTimeoutUs = 25000;
 
 enum ControllerState {
@@ -97,14 +100,28 @@ bool inductiveArmed = true;
 unsigned long inductiveActiveSince = 0;
 unsigned long inductiveEmptySince = 0;
 bool inductiveEmptyReported = false;
+bool manualRecoveryRequired = false;
 
 // Fullness monitoring remains independent of classification.
 unsigned long lastFullnessSampleAt = 0;
-unsigned long lastFullnessReportAt = 0;
-int fullConfirmCount = 0;
-int availableConfirmCount = 0;
 bool binFull = false;
-bool hasFullnessReport = false;
+struct BinFullness {
+  const char *name;
+  int trig;
+  int echo;
+  float threshold;
+  bool isFull = false;
+  bool readingValid = false;
+  bool hasReport = false;
+  unsigned long lastReportAt = 0;
+  int fullCount = 0;
+  int availableCount = 0;
+};
+BinFullness fullnessSensors[2] = {
+  {"plastic", trigPin, echoPin, plasticFullDistanceCm},
+  {"metal", metalTrigPin, metalEchoPin, metalFullDistanceCm}
+};
+int nextFullnessSensor = 0;
 
 const char *stateName(ControllerState state) {
   switch (state) {
@@ -125,6 +142,7 @@ void sendEvent(const char *eventName, bool success = true, const char *messageTe
   if (activeDetectionId.length()) message["detectionId"] = activeDetectionId;
   message["success"] = success;
   message["state"] = stateName(controllerState);
+  if (manualRecoveryRequired) message["requiresManualReset"] = true;
   if (messageText) message["message"] = messageText;
   serializeJson(message, Serial);
   Serial.println();
@@ -133,6 +151,9 @@ void sendEvent(const char *eventName, bool success = true, const char *messageTe
 void setState(ControllerState nextState) {
   controllerState = nextState;
   stateStartedAt = millis();
+  // Clear time observed during motion must never count toward rearming.
+  inductiveEmptySince = 0;
+  inductiveEmptyReported = false;
   sendEvent("status");
 }
 
@@ -154,9 +175,18 @@ void safeMotorStop() {
 }
 
 void recoverToIdle(const char *reason) {
+  // A stopped move may leave the platform away from home. It must be checked
+  // and returned home manually before restarting the ESP32 with its EN button.
+  manualRecoveryRequired = manualRecoveryRequired || controllerState == SORTING
+      || controllerState == WAITING_FOR_PLATFORM_EMPTY;
+  inductiveArmed = false;
+  inductiveActiveSince = 0;
   safeMotorStop();
   setState(ERROR_RECOVERY);
-  sendEvent("error", false, reason);
+  String notice = String(reason) + (manualRecoveryRequired
+      ? ". Sorting locked. Remove the waste, check the mechanism and return it home, then press ESP32 EN to restart."
+      : ". Remove the waste; waiting for the metal sensor to stay clear.");
+  sendEvent("error", false, notice.c_str());
 }
 
 void startStepper(int steps, bool direction) {
@@ -282,6 +312,14 @@ void processCommand(const char *line) {
   }
   if (action == "platform_empty") {
     if (controllerState == WAITING_FOR_PLATFORM_EMPTY && detectionId == activeDetectionId) {
+      if (activeWasteType == "Tin Can") {
+        // Only acknowledge our own post-cycle clear report, never an early
+        // camera/gateway message. If metal returned since the report, stay
+        // disarmed in IDLE until a new continuous clear interval completes.
+        if (!inductiveEmptyReported) return;
+        inductiveArmed = digitalRead(inductivePin) != LOW;
+        inductiveActiveSince = 0;
+      }
       clearBatch();
       setState(IDLE);
       sendEvent("ready");
@@ -296,6 +334,11 @@ void processCommand(const char *line) {
       return;
     }
     bool canReserve = controllerState == IDLE || controllerState == DETECTING || controllerState == WAITING_FOR_AI;
+    if (wasteType == "Tin Can") {
+      // The sensor creates the reservation once. A bouncing sensor or a
+      // repeated command cannot create another metal transaction.
+      canReserve = controllerState == WAITING_FOR_AI && detectionId == activeDetectionId;
+    }
     if (!canReserve || !detectionId.length() || !supportedWasteType(wasteType) || itemCount < 1) {
       sendEvent("busy", false, "Station cannot reserve this batch");
       return;
@@ -380,8 +423,8 @@ void updateInductiveSensor() {
     return;
   }
 
-  // Metal bypasses camera detection, so sensor release is also the reliable
-  // platform-empty signal that rearms the kiosk after sorting.
+  // Sensor clearance is only a proximity check, not proof that waste fell.
+  // Start this interval only after the gate and stepper finish the full cycle.
   if (controllerState == WAITING_FOR_PLATFORM_EMPTY && activeWasteType == "Tin Can") {
     if (metalActive) {
       inductiveEmptySince = 0;
@@ -399,13 +442,23 @@ void updateInductiveSensor() {
     return;
   }
 
+  // Continue reporting presence for the mixed-waste interlock, but do not
+  // rearm or reserve another item during preparation, motion or recovery.
+  if (controllerState != IDLE && controllerState != DETECTING) return;
+
   if (!metalActive) {
-    inductiveArmed = true;
     inductiveActiveSince = 0;
-    inductiveEmptySince = 0;
     if (controllerState == DETECTING) setState(IDLE);
+    if (!inductiveArmed) {
+      if (inductiveEmptySince == 0) inductiveEmptySince = millis();
+      if (millis() - inductiveEmptySince >= inductiveEmptyDebounceMs) {
+        inductiveArmed = true;
+        inductiveEmptySince = 0;
+      }
+    }
     return;
   }
+  inductiveEmptySince = 0;
   if (!inductiveArmed || binFull || (controllerState != IDLE && controllerState != DETECTING)) return;
   if (inductiveActiveSince == 0) {
     inductiveActiveSince = millis();
@@ -421,59 +474,84 @@ void updateInductiveSensor() {
 }
 
 void updateFullness() {
+  // pulseIn can block for 25 ms. Do not stretch stepper pulses with an echo
+  // wait; resume fullness measurements when the motor stops.
+  if (stepperBusy) return;
   unsigned long now = millis();
   if (now - lastFullnessSampleAt < fullnessSampleIntervalMs) return;
   lastFullnessSampleAt = now;
-  digitalWrite(trigPin, LOW);
+  BinFullness &sensor = fullnessSensors[nextFullnessSensor];
+  nextFullnessSensor = (nextFullnessSensor + 1) % 2;
+  digitalWrite(sensor.trig, LOW);
   delayMicroseconds(2);
-  digitalWrite(trigPin, HIGH);
+  digitalWrite(sensor.trig, HIGH);
   delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-  unsigned long duration = pulseIn(echoPin, HIGH, ultrasonicTimeoutUs);
-  if (duration == 0) {
-    sendEvent("ultrasonic_timeout", false, "No bounded echo received");
-    return;
-  }
+  digitalWrite(sensor.trig, LOW);
+  unsigned long duration = pulseIn(sensor.echo, HIGH, ultrasonicTimeoutUs);
   float distanceCm = duration * 0.0343 / 2.0;
-  if (distanceCm < 1.0 || distanceCm > 400.0) return;
-  bool fullNow = distanceCm <= fullDistanceCm;
-  if (fullNow) {
-    fullConfirmCount++;
-    availableConfirmCount = 0;
+  bool valid = duration > 0 && distanceCm >= 1.0 && distanceCm <= 400.0;
+  bool oldFull = sensor.isFull;
+  bool oldValid = sensor.readingValid;
+  if (!valid) {
+    sensor.readingValid = false;
+    sensor.fullCount = 0;
+    sensor.availableCount = 0;
   } else {
-    availableConfirmCount++;
-    fullConfirmCount = 0;
+    bool fullNow = distanceCm <= sensor.threshold;
+    if (fullNow) {
+      sensor.fullCount = min(fullnessConfirms, sensor.fullCount + 1);
+      sensor.availableCount = 0;
+    } else {
+      sensor.availableCount = min(fullnessConfirms, sensor.availableCount + 1);
+      sensor.fullCount = 0;
+    }
+    if (sensor.fullCount >= fullnessConfirms || sensor.availableCount >= fullnessConfirms) {
+      sensor.isFull = fullNow;
+      sensor.readingValid = true;
+    }
   }
-  if (fullConfirmCount < fullnessConfirms && availableConfirmCount < fullnessConfirms) return;
-  bool shouldReport = !hasFullnessReport || binFull != fullNow || now - lastFullnessReportAt >= fullnessHeartbeatMs;
+  binFull = fullnessSensors[0].isFull || fullnessSensors[1].isFull;
+  bool shouldReport = !sensor.hasReport || oldFull != sensor.isFull || oldValid != sensor.readingValid
+      || now - sensor.lastReportAt >= fullnessHeartbeatMs;
   if (!shouldReport) return;
-  binFull = fullNow;
   JsonDocument message;
   message["event"] = "bin_fullness";
-  message["isFull"] = binFull;
-  message["distanceCm"] = round(distanceCm * 10.0) / 10.0;
+  message["binType"] = sensor.name;
+  message["isFull"] = sensor.isFull;
+  message["stationFull"] = binFull;
+  message["readingValid"] = sensor.readingValid;
+  if (valid) message["distanceCm"] = round(distanceCm * 10.0) / 10.0;
+  else message["distanceCm"] = nullptr;
   message["state"] = stateName(controllerState);
   serializeJson(message, Serial);
   Serial.println();
-  hasFullnessReport = true;
-  lastFullnessReportAt = now;
+  sensor.hasReport = true;
+  sensor.lastReportAt = now;
 }
 
 void updateTimeoutsAndRecovery() {
   unsigned long elapsed = millis() - stateStartedAt;
   if (controllerState == WAITING_FOR_AI && elapsed > aiWaitTimeoutMs) {
-    sendEvent("timeout", false, "AI result timed out");
-    clearBatch();
-    setState(IDLE);
+    recoverToIdle("AI result timed out");
   } else if (controllerState == WAITING_FOR_CONFIRMATION && elapsed > confirmationTimeoutMs) {
     sendEvent("timeout", false, "Confirmation timed out");
     setState(WAITING_FOR_PLATFORM_EMPTY);
   } else if (controllerState == WAITING_FOR_PLATFORM_EMPTY && elapsed > platformEmptyTimeoutMs) {
     recoverToIdle("Platform-empty signal timed out");
   } else if (controllerState == ERROR_RECOVERY && servoCurrentAngle == servoNormalAngle) {
-    clearBatch();
-    setState(IDLE);
-    sendEvent("ready");
+    if (manualRecoveryRequired) return;
+    if (digitalRead(inductivePin) == LOW) {
+      inductiveEmptySince = 0;
+      return;
+    }
+    if (inductiveEmptySince == 0) inductiveEmptySince = millis();
+    if (millis() - inductiveEmptySince >= inductiveEmptyDebounceMs) {
+      clearBatch();
+      inductiveArmed = true;
+      inductiveActiveSince = 0;
+      setState(IDLE);
+      sendEvent("ready");
+    }
   }
 }
 
@@ -484,6 +562,9 @@ void setup() {
   pinMode(pulPin, OUTPUT);
   pinMode(trigPin, OUTPUT);
   pinMode(echoPin, INPUT);
+  pinMode(metalTrigPin, OUTPUT);
+  pinMode(metalEchoPin, INPUT);
+  digitalWrite(metalTrigPin, LOW);
   digitalWrite(dirPin, LOW);
   digitalWrite(pulPin, LOW);
   digitalWrite(trigPin, LOW);

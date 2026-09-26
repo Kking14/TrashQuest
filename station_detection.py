@@ -129,3 +129,56 @@ class PlatformClearTracker:
         if should_signal:
             self.signaled_detection_id = active_detection_id
         return is_clear, should_signal
+
+
+class MetalObjectMatcher:
+    """Associate at most one visible object with the metal sensor, then track it.
+
+    More than one candidate is ambiguous: no box is suppressed. A lost track
+    can only be reacquired at the sensor with a live metal signal.
+    """
+
+    def __init__(self, sensor_roi, stable_seconds=0.3, lost_seconds=0.75):
+        self.sensor_roi = sensor_roi
+        self.stable_seconds = stable_seconds
+        self.lost_seconds = lost_seconds
+        self.reset()
+
+    def reset(self):
+        self.box = None
+        self.since = None
+        self.last_seen = None
+
+    @staticmethod
+    def overlap(a, b):
+        area = max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(0, min(a[3], b[3]) - max(a[1], b[1]))
+        union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - area
+        return area / union if union > 0 else 0
+
+    def update(self, detections, *, metal_active, transaction_active, now):
+        detections = list(detections)
+        if not metal_active and not transaction_active:
+            self.reset()
+            return detections, None, False
+        if self.last_seen is not None and now - self.last_seen > self.lost_seconds:
+            self.reset()
+        if self.box is not None:
+            candidates = [i for i, item in enumerate(detections) if self.overlap(item.box, self.box) >= 0.2]
+        else:
+            sx = (self.sensor_roi[0] + self.sensor_roi[2]) / 2
+            sy = (self.sensor_roi[1] + self.sensor_roi[3]) / 2
+            candidates = [i for i, item in enumerate(detections)
+                          if metal_active and item.box[0] <= sx <= item.box[2] and item.box[1] <= sy <= item.box[3]]
+        if len(candidates) != 1:
+            # No visual candidate is required for sensor-only metal detection.
+            # Visible unmatched/ambiguous objects still trigger the interlock.
+            if candidates:
+                self.reset()
+            return detections, None, False
+        index = candidates[0]
+        matched = detections[index]
+        if self.since is None:
+            self.since = now
+        self.box = matched.box
+        self.last_seen = now
+        return [item for i, item in enumerate(detections) if i != index], matched, now - self.since < self.stable_seconds
