@@ -3,6 +3,7 @@ import {
     addReward,
     listRewards,
     editReward,
+    removeReward,
     serveRewardImage,
     uploadRewardImage,
     deleteRewardImage,
@@ -25,6 +26,7 @@ router.get('/:id/image', serveRewardImage);
 router.put('/:id/image', authenticate, authorize('admin'), express.raw({ type: 'image/jpeg', limit: '400kb' }), uploadRewardImage);
 router.delete('/:id/image', authenticate, authorize('admin'), deleteRewardImage);
 router.put('/:id', authenticate, authorize('admin'), editReward);
+router.delete('/:id', authenticate, authorize('admin'), removeReward);
 router.post('/:id/redeem', authenticate, redeem);
  
 export default router;

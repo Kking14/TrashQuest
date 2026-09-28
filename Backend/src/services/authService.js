@@ -1,7 +1,9 @@
 import User from '../models/userModel.js';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { hashResetCode } from './userService.js';
+import mongoose from 'mongoose';
+import { hashResetCode, issuePasswordResetCode } from './userService.js';
+import { assertEmailDeliveryConfigured, sendPasswordResetEmail } from './emailService.js';
 
 const registerUser = async (userData) => {
     const { firstName, lastName, middleInitial, email, password } = userData;
@@ -70,7 +72,7 @@ const resetPasswordWithCode = async (email, code, newPassword) => {
             email: normalizedEmail,
             status: 'active',
             passwordResetCodeHash: hashResetCode(normalizedCode),
-            passwordResetExpiresAt: { $gt: new Date() },
+            passwordResetExpiresAt: mongoose.trusted({ $gt: new Date() }),
         },
         {
             $set: { password },
@@ -80,4 +82,23 @@ const resetPasswordWithCode = async (email, code, newPassword) => {
     if (!user) throw new Error('Invalid or expired reset code');
 };
 
-export { registerUser, loginUser, resetPasswordWithCode };
+const requestPasswordResetEmail = async (email, sendEmail = sendPasswordResetEmail) => {
+    const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    if (!normalizedEmail) throw new Error('Email is required');
+    if (sendEmail === sendPasswordResetEmail) assertEmailDeliveryConfigured();
+    const user = await User.findOne({ email: normalizedEmail, role: 'user', status: 'active' })
+        .select('_id name email');
+    if (!user) return;
+
+    const { code, expiresAt } = await issuePasswordResetCode(user._id);
+    try {
+        await sendEmail({ email: user.email, name: user.name, code, expiresAt });
+    } catch (error) {
+        await User.findByIdAndUpdate(user._id, {
+            $unset: { passwordResetCodeHash: 1, passwordResetExpiresAt: 1 },
+        });
+        throw error;
+    }
+};
+
+export { registerUser, loginUser, requestPasswordResetEmail, resetPasswordWithCode };
