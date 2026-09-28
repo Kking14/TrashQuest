@@ -454,34 +454,91 @@ function ToastStack({ toasts, onDismiss }) {
   );
 }
 
+function PasswordVisibilityButton({ visible, onToggle }) {
+  const label = visible ? 'Hide password' : 'Show password';
+  return (
+    <button
+      type="button"
+      className="password-toggle"
+      onClick={onToggle}
+      aria-label={label}
+      aria-pressed={visible}
+      title={label}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        {visible ? (
+          <>
+            <path d="M3 3l18 18" />
+            <path d="M10.6 10.7a2 2 0 0 0 2.7 2.7" />
+            <path d="M9.9 4.3A10.7 10.7 0 0 1 12 4c5.5 0 9 5 9 5a15.7 15.7 0 0 1-2.1 2.5" />
+            <path d="M6.6 6.6C4.3 8.1 3 10 3 10s3.5 5 9 5c1.1 0 2.1-.2 3-.5" />
+          </>
+        ) : (
+          <>
+            <path d="M3 12s3.5-5 9-5 9 5 9 5-3.5 5-9 5-9-5-9-5Z" />
+            <circle cx="12" cy="12" r="2.5" />
+          </>
+        )}
+      </svg>
+    </button>
+  );
+}
+
 function AuthScreen({ onLogin, onOpenBinDisplay }) {
   const [mode, setMode] = useState('login');
   const [notice, setNotice] = useState('');
+  const [noticeTone, setNoticeTone] = useState('error');
   const [busy, setBusy] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [registrationPassword, setRegistrationPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [resetCodeSent, setResetCodeSent] = useState(false);
+  const [recoveryEmail, setRecoveryEmail] = useState('');
   const passwordStrength = getPasswordStrength(registrationPassword);
+
+  function switchAuthMode(nextMode) {
+    setNotice('');
+    setNoticeTone('error');
+    setShowPassword(false);
+    setShowConfirmPassword(false);
+    setResetCodeSent(false);
+    setRecoveryEmail('');
+    setMode(nextMode);
+  }
 
   async function handleSubmit(event) {
     event.preventDefault();
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
     const body = Object.fromEntries(form.entries());
-    if (mode !== 'login' && registrationPassword !== confirmPassword) {
+    const isSettingPassword = mode === 'register' || (mode === 'forgot' && resetCodeSent);
+    if (isSettingPassword && registrationPassword !== confirmPassword) {
+      setNoticeTone('error');
       setNotice('Passwords do not match.');
       return;
     }
     setBusy(true);
     setNotice('');
+    setNoticeTone('error');
 
     try {
       if (mode === 'forgot') {
+        if (!resetCodeSent) {
+          const response = await apiRequest('/api/auth/forgot-password', { method: 'POST', body: { email: body.email } });
+          setResetCodeSent(true);
+          setNoticeTone('success');
+          setNotice(response.message || 'If an active account uses that email, a reset code has been sent.');
+          return;
+        }
         await apiRequest('/api/auth/reset-password', { method: 'POST', body: { email: body.email, code: body.code, newPassword: registrationPassword } });
+        setNoticeTone('success');
         setNotice('Password reset. You can sign in now.');
         setMode('login');
         setRegistrationPassword('');
         setConfirmPassword('');
+        setResetCodeSent(false);
+        setRecoveryEmail('');
         formElement.reset();
         return;
       }
@@ -489,6 +546,7 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
       if (mode === 'login') {
         onLogin(response.data);
       } else {
+        setNoticeTone('success');
         setNotice('Account created. You can sign in now.');
         setMode('login');
         setRegistrationPassword('');
@@ -496,6 +554,7 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
         formElement.reset();
       }
     } catch (error) {
+      setNoticeTone('error');
       setNotice(error.message);
     } finally {
       setBusy(false);
@@ -534,13 +593,13 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
           <div className="auth-form-heading">
             <p className="eyebrow">Resident portal</p>
             <h2>{mode === 'login' ? 'Welcome back' : mode === 'register' ? 'Create your account' : 'Reset your password'}</h2>
-            <p>{mode === 'login' ? 'Sign in to view your points and quests.' : mode === 'register' ? 'Register to start earning rewards for recycling.' : 'Ask a barangay admin for a one-time reset code. It expires after 15 minutes.'}</p>
+            <p>{mode === 'login' ? 'Sign in to view your points and quests.' : mode === 'register' ? 'Register to start earning rewards for recycling.' : resetCodeSent ? 'Enter the code sent to your email. It expires after 15 minutes.' : 'Enter your account email and we will send you a one-time reset code.'}</p>
           </div>
           {mode !== 'forgot' && <div className="segmented">
-            <button type="button" className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}>
+            <button type="button" className={mode === 'login' ? 'active' : ''} onClick={() => switchAuthMode('login')}>
               Login
             </button>
-            <button type="button" className={mode === 'register' ? 'active' : ''} onClick={() => setMode('register')}>
+            <button type="button" className={mode === 'register' ? 'active' : ''} onClick={() => switchAuthMode('register')}>
               Register
             </button>
           </div>}
@@ -564,9 +623,9 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
 
           <label>
             Email
-            <input name="email" type="email" placeholder="you@example.com" required />
+            <input key={mode === 'forgot' ? 'recovery-email' : 'account-email'} name="email" type="email" placeholder="you@example.com" value={mode === 'forgot' ? recoveryEmail : undefined} onChange={mode === 'forgot' ? (event) => setRecoveryEmail(event.target.value) : undefined} readOnly={mode === 'forgot' && resetCodeSent} required />
           </label>
-          {mode === 'forgot' && <label>One-time reset code<input name="code" autoComplete="one-time-code" maxLength={16} placeholder="Code from your barangay admin" required /></label>}
+          {mode === 'forgot' && resetCodeSent && <label>One-time reset code<input name="code" autoComplete="one-time-code" maxLength={16} placeholder="Code from your email" required /></label>}
           {mode !== 'forgot' && <label>
             Password
             {mode === 'register' ? (
@@ -580,7 +639,7 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
                   placeholder="At least 8 characters"
                   autoComplete="new-password"
                   required
-                /><button type="button" className="password-toggle" onClick={() => setShowPassword((current) => !current)} aria-label={showPassword ? 'Hide password' : 'Show password'}>{showPassword ? 'Hide' : 'Show'}</button></div>
+                /><PasswordVisibilityButton visible={showPassword} onToggle={() => setShowPassword((current) => !current)} /></div>
                 <div className={`password-strength ${passwordStrength.tone}`}>
                   <div>{[1, 2, 3, 4, 5].map((step) => <i key={step} className={step <= passwordStrength.score ? 'filled' : ''} />)}</div>
                   <span>{passwordStrength.label}</span>
@@ -588,25 +647,28 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
                 <small className="password-hint">Use uppercase, lowercase, a number, and preferably a symbol.</small>
               </>
             ) : (
-              <div className="password-field"><input name="password" type={showPassword ? 'text' : 'password'} placeholder="Your password" autoComplete="current-password" required /><button type="button" className="password-toggle" onClick={() => setShowPassword((current) => !current)} aria-label={showPassword ? 'Hide password' : 'Show password'}>{showPassword ? 'Hide' : 'Show'}</button></div>
+              <div className="password-field"><input name="password" type={showPassword ? 'text' : 'password'} placeholder="Your password" autoComplete="current-password" required /><PasswordVisibilityButton visible={showPassword} onToggle={() => setShowPassword((current) => !current)} /></div>
             )}
           </label>}
 
-          {mode === 'forgot' && <label>New password<div className="password-field"><input name="newPassword" type={showPassword ? 'text' : 'password'} minLength={8} value={registrationPassword} onChange={(event) => setRegistrationPassword(event.target.value)} autoComplete="new-password" required /><button type="button" className="password-toggle" onClick={() => setShowPassword((current) => !current)}>{showPassword ? 'Hide' : 'Show'}</button></div></label>}
+          {mode === 'forgot' && resetCodeSent && <label>New password<div className="password-field"><input name="newPassword" type={showPassword ? 'text' : 'password'} minLength={8} value={registrationPassword} onChange={(event) => setRegistrationPassword(event.target.value)} autoComplete="new-password" required /><PasswordVisibilityButton visible={showPassword} onToggle={() => setShowPassword((current) => !current)} /></div></label>}
 
-          {mode !== 'login' && (
+          {(mode === 'register' || (mode === 'forgot' && resetCodeSent)) && (
             <label>
               Confirm password
-              <input
-                name="confirmPassword"
-                type={showPassword ? 'text' : 'password'}
-                minLength={8}
-                value={confirmPassword}
-                onChange={(event) => setConfirmPassword(event.target.value)}
-                placeholder="Type your password again"
-                autoComplete="new-password"
-                required
-              />
+              <div className="password-field">
+                <input
+                  name="confirmPassword"
+                  type={showConfirmPassword ? 'text' : 'password'}
+                  minLength={8}
+                  value={confirmPassword}
+                  onChange={(event) => setConfirmPassword(event.target.value)}
+                  placeholder="Type your password again"
+                  autoComplete="new-password"
+                  required
+                />
+                <PasswordVisibilityButton visible={showConfirmPassword} onToggle={() => setShowConfirmPassword((current) => !current)} />
+              </div>
               {confirmPassword && (
                 <small className={registrationPassword === confirmPassword ? 'password-match valid' : 'password-match invalid'}>
                   {registrationPassword === confirmPassword ? 'Passwords match' : 'Passwords do not match'}
@@ -615,12 +677,13 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
             </label>
           )}
 
-          {notice && <div className="notice compact">{notice}</div>}
+          {notice && <div className={`notice compact ${noticeTone}`} role={noticeTone === 'error' ? 'alert' : 'status'}>{notice}</div>}
           <button type="submit" className="primary-button" disabled={busy}>
-            {busy ? 'Working...' : mode === 'login' ? 'Sign in' : mode === 'register' ? 'Create account' : 'Reset password'}
+            {busy ? 'Working...' : mode === 'login' ? 'Sign in' : mode === 'register' ? 'Create account' : resetCodeSent ? 'Reset password' : 'Email reset code'}
           </button>
-          {mode === 'login' && <button type="button" className="text-button" onClick={() => { setNotice(''); setMode('forgot'); }}>Forgot password?</button>}
-          {mode === 'forgot' && <button type="button" className="text-button" onClick={() => { setNotice(''); setMode('login'); }}>Back to login</button>}
+          {mode === 'login' && <button type="button" className="text-button" onClick={() => switchAuthMode('forgot')}>Forgot password?</button>}
+          {mode === 'forgot' && resetCodeSent && <button type="button" className="text-button" onClick={() => { setResetCodeSent(false); setNotice(''); setRegistrationPassword(''); setConfirmPassword(''); }}>Send another code</button>}
+          {mode === 'forgot' && <button type="button" className="text-button" onClick={() => switchAuthMode('login')}>Back to login</button>}
         </form>
       </section>
     </main>
@@ -1515,8 +1578,8 @@ function ResidentApp({ data, loading, logout, notice, refreshData, runAction, se
             <h1>Hi, {session.firstName || session.name}</h1>
           </div>
         </div>
-        <button type="button" className="icon-button" onClick={logout} aria-label="Sign out">
-          Exit
+        <button type="button" className="icon-button" onClick={logout} aria-label="Log out">
+          Log out
         </button>
       </header>
 
@@ -1826,7 +1889,7 @@ function AdminApp({ data, loading, logout, notice, refreshData, runAction, sessi
           <span>{session.email}</span>
           <span className="badge">admin</span>
           <button type="button" className="ghost-button" onClick={logout}>
-            Sign out
+            Log out
           </button>
         </div>
       </aside>
@@ -1853,25 +1916,17 @@ function AdminApp({ data, loading, logout, notice, refreshData, runAction, sessi
             <button type="button" onClick={() => setView('admin-bins')}>View bins</button>
           </section>
         )}
-        {view === 'admin-overview' && <>
-          <section className="compartment-overview" aria-label="Bin fullness monitoring">
-            {data.bins.map((bin) => <div key={bin._id}>
-              <h3>{bin.code}{bin.location ? ` — ${bin.location}` : ''}</h3>
-              <BinFullnessIndicators compartments={bin.compartments} />
-            </div>)}
-          </section>
-          <AdminOverview data={data} token={token} loading={loading} />
-        </>}
+        {view === 'admin-overview' && <AdminOverview data={data} token={token} loading={loading} onViewBins={() => setView('admin-bins')} />}
         {view === 'admin-bins' && <AdminBinTools data={data} token={token} runAction={runAction} loading={loading} />}
         {view === 'admin-quests' && <AdminQuestTools quests={data.quests} token={token} runAction={runAction} loading={loading} />}
         {view === 'admin-rewards' && <AdminRewardTools rewards={data.rewards} token={token} runAction={runAction} loading={loading} />}
-        {view === 'admin-users' && <AdminUsers users={data.users} token={token} runAction={runAction} />}
+        {view === 'admin-users' && <AdminUsers users={data.users} token={token} runAction={runAction} loading={loading} />}
       </section>
     </main>
   );
 }
 
-function AdminOverview({ data, token, loading }) {
+function AdminOverview({ data, token, loading, onViewBins }) {
   const [selectedUser, setSelectedUser] = useState(null);
   const [page, setPage] = useState(1);
   const [pagedOverview, setPagedOverview] = useState(null);
@@ -1911,6 +1966,15 @@ function AdminOverview({ data, token, loading }) {
     return <section className="panel"><p>{loading || pageLoading ? 'Loading overview…' : pageError || 'Overview unavailable. Use Refresh to try again.'}</p>{page > 1 && !pageLoading && <button type="button" className="secondary-button small" onClick={() => setPage(1)}>Back to first page</button>}</section>;
   }
   const { metrics, residents, pagination } = overview;
+  const totalStations = data.bins.length;
+  const stationsNeedingCollection = data.bins.filter((bin) => bin.isFull || bin.status === 'needs_collection').length;
+  const stationsNeedingSensorCheck = data.bins.filter((bin) => (
+    Object.keys(compartmentNames).some((key) => !compartmentStatus(bin.compartments?.[key]).fresh)
+  )).length;
+  const healthyStations = data.bins.filter((bin) => (
+    !(bin.isFull || bin.status === 'needs_collection')
+    && Object.keys(compartmentNames).every((key) => compartmentStatus(bin.compartments?.[key]).fresh)
+  )).length;
 
   return (
     <div className="view-stack">
@@ -1919,6 +1983,33 @@ function AdminOverview({ data, token, loading }) {
         <Metric label="Items recorded" value={metrics.itemsRecorded.toLocaleString()} />
         <Metric label="Current quests" value={metrics.currentQuests.toLocaleString()} />
         <Metric label="Bins needing collection" value={data.binCount ?? metrics.binsNeedingCollection} tone="warning" />
+      </section>
+      <section className="panel overview-bin-status" aria-label="Station health summary">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Live station health</p>
+            <h3>Station health</h3>
+          </div>
+          <button type="button" className="secondary-button small" onClick={onViewBins}>View all bins</button>
+        </div>
+        <div className="station-health-summary">
+          <div>
+            <strong>{totalStations}</strong>
+            <span>Total stations</span>
+          </div>
+          <div className="healthy">
+            <strong>{healthyStations}</strong>
+            <span>All sensors ready</span>
+          </div>
+          <div className={stationsNeedingCollection ? 'attention' : ''}>
+            <strong>{stationsNeedingCollection}</strong>
+            <span>Need collection</span>
+          </div>
+          <div className={stationsNeedingSensorCheck ? 'warning' : ''}>
+            <strong>{stationsNeedingSensorCheck}</strong>
+            <span>Need sensor check</span>
+          </div>
+        </div>
       </section>
       <section className="panel">
         <div className="section-heading">
@@ -2187,6 +2278,7 @@ function AdminBinTools({ data, token, runAction, loading }) {
 function AdminQuestTools({ quests, token, runAction, loading }) {
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingQuest, setEditingQuest] = useState(null);
+  const [questToDelete, setQuestToDelete] = useState(null);
   const [questTab, setQuestTab] = useState('current');
   const now = new Date();
   const currentQuests = quests.filter((quest) => quest.status !== 'closed' && new Date(quest.expiryDate) >= now);
@@ -2203,6 +2295,15 @@ function AdminQuestTools({ quests, token, runAction, loading }) {
       targetInput.setCustomValidity('Enter an item target.');
       targetInput.reportValidity();
       targetInput.setCustomValidity('');
+      return;
+    }
+    const startDate = new Date(form.get('startDate'));
+    const expiryDate = new Date(form.get('expiryDate'));
+    if (expiryDate <= startDate) {
+      const expiryInput = formElement.querySelector('[name="expiryDate"]');
+      expiryInput.setCustomValidity('The end date must be later than the start date.');
+      expiryInput.reportValidity();
+      expiryInput.setCustomValidity('');
       return;
     }
     const result = await runAction(
@@ -2235,12 +2336,13 @@ function AdminQuestTools({ quests, token, runAction, loading }) {
     setShowAddModal(true);
   }
 
-  async function removeQuest(quest) {
-    if (!window.confirm(`Delete "${quest.title}"? This also removes its participant history.`)) return;
-    await runAction(
-      () => apiRequest(`/api/quests/${quest._id}`, { method: 'DELETE', token }),
+  async function removeQuest() {
+    if (!questToDelete) return;
+    const result = await runAction(
+      () => apiRequest(`/api/quests/${questToDelete._id}`, { method: 'DELETE', token }),
       'Quest deleted'
     );
+    if (result) setQuestToDelete(null);
   }
 
   return (
@@ -2257,7 +2359,7 @@ function AdminQuestTools({ quests, token, runAction, loading }) {
           History <span>{historicalQuests.length}</span>
         </button>
       </div>
-      <QuestView quests={questTab === 'current' ? currentQuests : historicalQuests} session={null} admin history={questTab === 'history'} onEdit={openQuestEditor} onDelete={removeQuest} />
+      <QuestView quests={questTab === 'current' ? currentQuests : historicalQuests} session={null} admin history={questTab === 'history'} onEdit={openQuestEditor} onDelete={setQuestToDelete} />
       {showAddModal && (
       <Modal title={editingQuest ? 'Edit quest' : 'Schedule a quest'} eyebrow={editingQuest ? 'Update community goal' : 'New community goal'} onClose={() => { setShowAddModal(false); setEditingQuest(null); }}>
       <AdminForm title="Quest details" eyebrow="Schedule" onSubmit={saveQuest}>
@@ -2273,11 +2375,29 @@ function AdminQuestTools({ quests, token, runAction, loading }) {
         <label>Item target<input name="targetCount" type="number" min="1" placeholder="Number of objects" defaultValue={editingQuest?.targetCount || ''} required /></label>
         <label>Reward points<input name="pointsReward" type="number" min="0" defaultValue={editingQuest?.pointsReward ?? 50} required /></label>
         <label>Quest type<select name="frequency" defaultValue={editingQuest?.frequency || 'daily'}><option value="daily">Daily quest</option><option value="weekly">Weekly quest</option></select></label>
-        <label>Starts<input name="startDate" type="datetime-local" defaultValue={formatDateTimeLocal(editingQuest?.startDate)} required /></label>
-        <label>Ends<input name="expiryDate" type="datetime-local" defaultValue={formatDateTimeLocal(editingQuest?.expiryDate)} required /></label>
+        <label>Starts<input name="startDate" type="datetime-local" defaultValue={formatDateTimeLocal(editingQuest?.startDate)} onChange={(event) => {
+          const expiryInput = event.currentTarget.form?.elements.expiryDate;
+          if (expiryInput) expiryInput.min = event.currentTarget.value;
+        }} required /></label>
+        <label>Ends<input name="expiryDate" type="datetime-local" min={formatDateTimeLocal(editingQuest?.startDate)} defaultValue={formatDateTimeLocal(editingQuest?.expiryDate)} required /></label>
         <button className="primary-button" type="submit" disabled={loading}>{editingQuest ? 'Save changes' : 'Create quest'}</button>
       </AdminForm>
       </Modal>
+      )}
+      {questToDelete && (
+        <Modal title="Delete quest?" eyebrow="Permanent action" onClose={() => setQuestToDelete(null)}>
+          <div className="delete-confirmation">
+            <div className="delete-confirmation-icon" aria-hidden="true">!</div>
+            <div>
+              <h4>{questToDelete.title}</h4>
+              <p>This quest and its participant history will be permanently removed. This action cannot be undone.</p>
+            </div>
+            <div className="delete-confirmation-actions">
+              <button type="button" className="secondary-button" onClick={() => setQuestToDelete(null)} disabled={loading}>Keep quest</button>
+              <button type="button" className="danger-button" onClick={removeQuest} disabled={loading}>{loading ? 'Deleting…' : 'Delete quest'}</button>
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   );
@@ -2317,9 +2437,16 @@ function RewardPhotoPicker({ file, onChange }) {
 
   return (
     <div className="reward-photo-picker">
-      <label>
-        Reward photo (optional)
+      <label className="reward-photo-upload">
+        <span className="reward-photo-upload-label">Reward photo <small>Optional</small></span>
         <input type="file" accept="image/*" onChange={(event) => onChange(event.target.files?.[0] || null)} />
+        <span className="reward-photo-upload-control">
+          <span className="reward-photo-upload-button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" /></svg>
+            Upload photo
+          </span>
+          <span className={`reward-photo-file-name ${file ? 'selected' : ''}`}>{file?.name || 'No photo selected'}</span>
+        </span>
       </label>
       {previewUrl && <img className="reward-photo-preview" src={previewUrl} alt="Selected reward photo preview" />}
       <small>The photo will be resized and optimized before upload. Maximum original file size: 10 MB.</small>
@@ -2330,17 +2457,20 @@ function RewardPhotoPicker({ file, onChange }) {
 function AdminRewardTools({ rewards, token, runAction, loading }) {
   const [showAddModal, setShowAddModal] = useState(false);
   const [addImageFile, setAddImageFile] = useState(null);
-  const [photoReward, setPhotoReward] = useState(null);
+  const [editingReward, setEditingReward] = useState(null);
   const [editImageFile, setEditImageFile] = useState(null);
+  const [removeExistingPhoto, setRemoveExistingPhoto] = useState(false);
+  const [rewardToDelete, setRewardToDelete] = useState(null);
 
   function closeAddModal() {
     setShowAddModal(false);
     setAddImageFile(null);
   }
 
-  function closePhotoModal() {
-    setPhotoReward(null);
+  function closeEditModal() {
+    setEditingReward(null);
     setEditImageFile(null);
+    setRemoveExistingPhoto(false);
   }
 
   async function createReward(event) {
@@ -2370,23 +2500,42 @@ function AdminRewardTools({ rewards, token, runAction, loading }) {
     }
   }
 
-  async function savePhoto(event) {
+  async function updateRewardDetails(event) {
     event.preventDefault();
-    if (!photoReward || !editImageFile) return;
+    if (!editingReward) return;
+    const form = new FormData(event.currentTarget);
     const result = await runAction(
-      () => uploadRewardPhoto(photoReward._id, editImageFile, token),
-      'Reward photo saved'
+      async () => {
+        const updated = await apiRequest(`/api/rewards/${editingReward._id}`, {
+          method: 'PUT',
+          token,
+          body: {
+            name: form.get('name'),
+            description: form.get('description'),
+            pointsCost: Number(form.get('pointsCost')),
+            stock: Number(form.get('stock')),
+            status: form.get('status'),
+          },
+        });
+        if (editImageFile) {
+          await uploadRewardPhoto(editingReward._id, editImageFile, token);
+        } else if (removeExistingPhoto && editingReward.imageContentType) {
+          await apiRequest(`/api/rewards/${editingReward._id}/image`, { method: 'DELETE', token });
+        }
+        return updated;
+      },
+      'Reward updated'
     );
-    if (result) closePhotoModal();
+    if (result) closeEditModal();
   }
 
-  async function removePhoto() {
-    if (!photoReward) return;
+  async function deleteSelectedReward() {
+    if (!rewardToDelete) return;
     const result = await runAction(
-      () => apiRequest(`/api/rewards/${photoReward._id}/image`, { method: 'DELETE', token }),
-      'Reward photo removed'
+      () => apiRequest(`/api/rewards/${rewardToDelete._id}`, { method: 'DELETE', token }),
+      'Reward deleted'
     );
-    if (result) closePhotoModal();
+    if (result) setRewardToDelete(null);
   }
 
   return (
@@ -2395,12 +2544,12 @@ function AdminRewardTools({ rewards, token, runAction, loading }) {
         <div><p className="eyebrow">Rewards catalog</p><h3>Available rewards</h3></div>
         <button type="button" className="primary-button" onClick={() => setShowAddModal(true)}>+ Add reward</button>
       </div>
-      <AdminRewardCatalog rewards={rewards} onEditPhoto={(reward) => { setPhotoReward(reward); setEditImageFile(null); }} />
+      <AdminRewardCatalog rewards={rewards} onEdit={(reward) => { setEditingReward(reward); setEditImageFile(null); setRemoveExistingPhoto(false); }} onDelete={setRewardToDelete} />
       {showAddModal && (
       <Modal title="Add a reward" eyebrow="Catalog item" onClose={closeAddModal}>
       <AdminForm title="Add reward" eyebrow="Catalog" onSubmit={createReward}>
         <label>Name<input name="name" placeholder="Eco voucher" required /></label>
-        <label>Description<input name="description" placeholder="Redeem at the admin booth" /></label>
+        <label>Description<input name="description" placeholder="Redeem at the admin booth" required /></label>
         <label>Points cost<input name="pointsCost" type="number" min="0" defaultValue="100" required /></label>
         <label>Stock<input name="stock" type="number" min="0" defaultValue="10" required /></label>
         <RewardPhotoPicker file={addImageFile} onChange={setAddImageFile} />
@@ -2408,17 +2557,39 @@ function AdminRewardTools({ rewards, token, runAction, loading }) {
       </AdminForm>
       </Modal>
       )}
-      {photoReward && (
-        <Modal title={`Photo for ${photoReward.name}`} eyebrow="Reward image" onClose={closePhotoModal}>
-          <form className="reward-photo-editor" onSubmit={savePhoto}>
-            <RewardImage reward={photoReward} />
+      {editingReward && (
+        <Modal title="Edit reward" eyebrow="Catalog item" onClose={closeEditModal}>
+          <form className="admin-form reward-edit-form" onSubmit={updateRewardDetails}>
+            <div className="form-grid">
+              <label>Name<input name="name" defaultValue={editingReward.name} required /></label>
+              <label>Description<input name="description" defaultValue={editingReward.description || ''} required /></label>
+              <label>Points cost<input name="pointsCost" type="number" min="0" defaultValue={editingReward.pointsCost} required /></label>
+              <label>Stock<input name="stock" type="number" min="0" defaultValue={editingReward.stock} required /></label>
+              <label>Status<select name="status" defaultValue={editingReward.status}><option value="active">Active</option><option value="inactive">Inactive</option></select></label>
+            </div>
+            {editingReward.imageContentType && !removeExistingPhoto && !editImageFile && <RewardImage reward={editingReward} />}
             <RewardPhotoPicker file={editImageFile} onChange={setEditImageFile} />
             <div className="reward-photo-actions">
-              <button type="button" className="secondary-button" onClick={closePhotoModal}>Cancel</button>
-              {photoReward.imageContentType && <button type="button" className="danger-button" onClick={removePhoto} disabled={loading}>Remove photo</button>}
-              <button type="submit" className="primary-button" disabled={loading || !editImageFile}>Save photo</button>
+              <button type="button" className="secondary-button" onClick={closeEditModal}>Cancel</button>
+              {editingReward.imageContentType && !editImageFile && <button type="button" className="danger-button" onClick={() => setRemoveExistingPhoto((current) => !current)} disabled={loading}>{removeExistingPhoto ? 'Keep current photo' : 'Remove current photo'}</button>}
+              <button type="submit" className="primary-button" disabled={loading}>{loading ? 'Saving…' : 'Save changes'}</button>
             </div>
           </form>
+        </Modal>
+      )}
+      {rewardToDelete && (
+        <Modal title="Delete reward?" eyebrow="Permanent action" onClose={() => setRewardToDelete(null)}>
+          <div className="delete-confirmation">
+            <div className="delete-confirmation-icon" aria-hidden="true">!</div>
+            <div>
+              <h4>{rewardToDelete.name}</h4>
+              <p>This reward will be permanently removed. Rewards with redemption history must be set to Inactive instead so resident records remain available.</p>
+            </div>
+            <div className="delete-confirmation-actions">
+              <button type="button" className="secondary-button" onClick={() => setRewardToDelete(null)} disabled={loading}>Keep reward</button>
+              <button type="button" className="danger-button" onClick={deleteSelectedReward} disabled={loading}>{loading ? 'Deleting…' : 'Delete reward'}</button>
+            </div>
+          </div>
         </Modal>
       )}
       <AdminRedemptions rewards={rewards} token={token} runAction={runAction} />
@@ -2426,12 +2597,12 @@ function AdminRewardTools({ rewards, token, runAction, loading }) {
   );
 }
 
-function AdminRewardCatalog({ rewards, onEditPhoto }) {
+function AdminRewardCatalog({ rewards, onEdit, onDelete }) {
   return (
     <section className="panel">
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Reward</th><th>Description</th><th>Cost</th><th>Stock</th><th>Status</th><th>Photo</th></tr></thead>
+          <thead><tr><th>Reward</th><th>Description</th><th>Cost</th><th>Stock</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody>
             {rewards.map((reward) => (
               <tr key={reward._id}>
@@ -2440,7 +2611,7 @@ function AdminRewardCatalog({ rewards, onEditPhoto }) {
                 <td>{reward.pointsCost} pts</td>
                 <td>{reward.stock}</td>
                 <td><span className={reward.status === 'active' ? 'badge success' : 'badge'}>{reward.status}</span></td>
-                <td><button type="button" className="secondary-button small" onClick={() => onEditPhoto(reward)}>{reward.imageContentType ? 'Change photo' : 'Add photo'}</button></td>
+                <td><div className="row-actions"><button type="button" className="secondary-button small" onClick={() => onEdit(reward)}>Edit</button><button type="button" className="danger-button small" onClick={() => onDelete(reward)}>Delete</button></div></td>
               </tr>
             ))}
             {rewards.length === 0 && <TableEmpty colSpan={6} text="No rewards found." />}
@@ -2822,23 +2993,25 @@ function RewardView({ rewards, redemptions, points, token, runAction, onScan, on
       )}
       {selectedReward && (
         <Modal title="Confirm reward" eyebrow="Before you redeem" onClose={() => setSelectedReward(null)}>
-          <RewardImage reward={selectedReward} />
-          <div className="reward-confirmation">
-            <div className="reward-confirmation-icon">◇</div>
-            <div>
-              <p>Are you sure this is the reward you want to get?</p>
-              <h4>{selectedReward.name}</h4>
-              <small>{selectedReward.description || 'Reward available from your community admin.'}</small>
-            </div>
-            <dl>
-              <div><dt>Your points</dt><dd>{verifiedPoints} pts</dd></div>
-              <div><dt>Reward cost</dt><dd>− {selectedReward.pointsCost} pts</dd></div>
-              <div className="reward-balance"><dt>Points after redemption</dt><dd>{Math.max(0, verifiedPoints - selectedReward.pointsCost)} pts</dd></div>
-            </dl>
-            {!canAffordSelected && <p className="form-error">You do not have enough points for this reward.</p>}
-            <div className="reward-confirmation-actions">
-              <button type="button" className="secondary-button" onClick={() => setSelectedReward(null)}>Cancel</button>
-          <button type="button" className="primary-button" disabled={!canAffordSelected || redeeming} onClick={confirmRedemption}>{redeeming ? 'Redeeming…' : 'Yes, redeem reward'}</button>
+          <div className="reward-confirmation-content">
+            <RewardImage reward={selectedReward} />
+            <div className="reward-confirmation">
+              <div className="reward-confirmation-icon">◇</div>
+              <div>
+                <p>Are you sure this is the reward you want to get?</p>
+                <h4>{selectedReward.name}</h4>
+                <small>{selectedReward.description || 'Reward available from your community admin.'}</small>
+              </div>
+              <dl>
+                <div><dt>Your points</dt><dd>{verifiedPoints} pts</dd></div>
+                <div><dt>Reward cost</dt><dd>− {selectedReward.pointsCost} pts</dd></div>
+                <div className="reward-balance"><dt>Points after redemption</dt><dd>{Math.max(0, verifiedPoints - selectedReward.pointsCost)} pts</dd></div>
+              </dl>
+              {!canAffordSelected && <p className="form-error">You do not have enough points for this reward.</p>}
+              <div className="reward-confirmation-actions">
+                <button type="button" className="secondary-button" onClick={() => setSelectedReward(null)}>Cancel</button>
+                <button type="button" className="primary-button" disabled={!canAffordSelected || redeeming} onClick={confirmRedemption}>{redeeming ? 'Redeeming…' : 'Yes, redeem reward'}</button>
+              </div>
             </div>
           </div>
         </Modal>
@@ -2972,9 +3145,9 @@ function AdminRedemptions({ rewards, token, runAction }) {
   );
 }
 
-function AdminUsers({ users, token, runAction }) {
+function AdminUsers({ users, token, runAction, loading }) {
   const [search, setSearch] = useState('');
-  const [resetDetails, setResetDetails] = useState(null);
+  const [statusChangeUser, setStatusChangeUser] = useState(null);
   const [sort, setSort] = useState({ key: 'name', direction: 'asc' });
   const [page, setPage] = useState(1);
   const pageSize = 10;
@@ -2997,13 +3170,16 @@ function AdminUsers({ users, token, runAction }) {
     setSort((current) => ({ key, direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc' }));
   }
 
-  async function issueResetCode(user) {
-    if (!window.confirm(`Issue a 15-minute password reset code for ${user.name}? Verify the resident's identity before sharing it.`)) return;
+  async function confirmStatusChange() {
+    if (!statusChangeUser) return;
+    const reactivating = statusChangeUser.status === 'inactive';
     const result = await runAction(
-      () => apiRequest(`/api/users/${user._id}/password-reset`, { method: 'POST', token }),
-      'Reset code issued'
+      () => apiRequest(`/api/users/${statusChangeUser._id}`, reactivating
+        ? { method: 'PUT', token, body: { status: 'active' } }
+        : { method: 'DELETE', token }),
+      reactivating ? 'User reactivated' : 'User deactivated'
     );
-    if (result) setResetDetails({ name: user.name, ...result.data });
+    if (result) setStatusChangeUser(null);
   }
 
   return (
@@ -3042,18 +3218,11 @@ function AdminUsers({ users, token, runAction }) {
                 <td>{user.email}</td>
                 <td>{user.points || 0}</td>
                 <td>{user.status}</td>
-                <td>
-                  {user.status === 'active' && user.role !== 'admin' && <button type="button" className="secondary-button small" onClick={() => issueResetCode(user)}>Reset password</button>}
+                <td className="row-actions">
                   {user.status === 'inactive' ? (
-                    <button type="button" className="secondary-button small" onClick={() => runAction(
-                      () => apiRequest(`/api/users/${user._id}`, { method: 'PUT', token, body: { status: 'active' } }),
-                      'User reactivated'
-                    )}>Reactivate</button>
+                    <button type="button" className="secondary-button small" onClick={() => setStatusChangeUser(user)}>Reactivate</button>
                   ) : (
-                    <button type="button" className="danger-button small" onClick={() => runAction(
-                      () => apiRequest(`/api/users/${user._id}`, { method: 'DELETE', token }),
-                      'User deactivated'
-                    )}>Deactivate</button>
+                    <button type="button" className="danger-button small" onClick={() => setStatusChangeUser(user)}>Deactivate</button>
                   )}
                 </td>
               </tr>
@@ -3062,12 +3231,24 @@ function AdminUsers({ users, token, runAction }) {
           </tbody>
         </table>
       </div>
-      {resetDetails && <Modal title="One-time password reset code" eyebrow={resetDetails.name} onClose={() => setResetDetails(null)}>
-        <p>Share this code with the verified resident. It expires in 15 minutes and is shown only here.</p>
-        <strong className="reset-code">{resetDetails.code}</strong>
-        <p>The resident can select “Forgot password?” on the login page and enter their email, this code, and a new password.</p>
-        <button type="button" className="primary-button" onClick={() => setResetDetails(null)}>Done</button>
-      </Modal>}
+      {statusChangeUser && (() => {
+        const reactivating = statusChangeUser.status === 'inactive';
+        return <Modal title={`${reactivating ? 'Reactivate' : 'Deactivate'} account?`} eyebrow="Confirm account status" onClose={() => setStatusChangeUser(null)}>
+          <div className={`account-status-confirmation ${reactivating ? 'reactivate' : 'deactivate'}`}>
+            <div className="account-status-confirmation-icon" aria-hidden="true">{reactivating ? '✓' : '!'}</div>
+            <div>
+              <h4>{statusChangeUser.name}</h4>
+              <p>{reactivating
+                ? 'This resident will be able to sign in and use TrashQuest again.'
+                : 'This resident will no longer be able to sign in. Their points, disposal history, and reward records will be preserved.'}</p>
+            </div>
+            <div className="account-status-confirmation-actions">
+              <button type="button" className="secondary-button" onClick={() => setStatusChangeUser(null)} disabled={loading}>Cancel</button>
+              <button type="button" className={reactivating ? 'primary-button' : 'danger-button'} onClick={confirmStatusChange} disabled={loading}>{loading ? 'Updating…' : `${reactivating ? 'Reactivate' : 'Deactivate'} account`}</button>
+            </div>
+          </div>
+        </Modal>;
+      })()}
       <div className="pagination">
         <button type="button" className="secondary-button small" disabled={safePage === 1} onClick={() => setPage(safePage - 1)}>Previous</button>
         <span>Page {safePage} of {totalPages}</span>

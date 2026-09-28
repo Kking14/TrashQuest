@@ -17,6 +17,12 @@ Add these **Production** environment variables to the API project:
 | `MONGO_URI` | MongoDB Atlas URI for the existing TrashQuest database, with the rotated password |
 | `JWT_SECRET` | A new random secret of at least 32 characters |
 | `FRONTEND_ORIGINS` | The exact HTTPS origin of the frontend project, without a trailing slash; comma-separate additional trusted origins |
+| `SMTP_HOST` | SMTP server hostname, such as `smtp.gmail.com` |
+| `SMTP_PORT` | SMTP port, normally `465` for secure SMTP or `587` for STARTTLS |
+| `SMTP_SECURE` | `true` for port 465; otherwise `false` |
+| `SMTP_USER` | Email account used to send password-reset messages |
+| `SMTP_PASS` | Email provider app password or SMTP credential; never commit it |
+| `SMTP_FROM` | Sender shown to residents, such as `TrashQuest <mail@example.com>` |
 
 Set MongoDB Atlas network access so the Vercel deployment can connect. Review Atlas's network-access options before widening the allowlist. Deploy the API, then open `https://YOUR-API.vercel.app/api/health`. A JSON response with `success: true` confirms the function and database are reachable.
 

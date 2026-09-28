@@ -1,4 +1,4 @@
-import { registerUser, loginUser, resetPasswordWithCode } from '../services/authService.js';
+import { registerUser, loginUser, requestPasswordResetEmail, resetPasswordWithCode } from '../services/authService.js';
 import bcrypt from 'bcryptjs';
 import User from '../models/userModel.js';
 import { getPasswordPolicyErrors } from '../utils/passwordPolicy.js';
@@ -150,11 +150,24 @@ const resetPassword = async (req, res) => {
     }
 };
 
+const requestPasswordReset = async (req, res) => {
+    try {
+        await requestPasswordResetEmail(req.body?.email);
+        return res.status(200).json({
+            success: true,
+            message: 'If an active account uses that email, a reset code has been sent.',
+        });
+    } catch (error) {
+        return res.status(503).json({ success: false, message: error.message });
+    }
+};
+
 export {
     registerAccount,
     loginAccount,
     logoutAccount,
     getProfile,
     updatePassword,
+    requestPasswordReset,
     resetPassword,
 };

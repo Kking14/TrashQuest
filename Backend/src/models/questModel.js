@@ -96,6 +96,9 @@ questSchema.pre('validate', function validateQuestTarget(next) {
     if (!this.targetCount) {
         return next(new Error('Set an item-count target'));
     }
+    if (this.startDate && this.expiryDate && this.expiryDate <= this.startDate) {
+        return next(new Error('The quest end date must be later than the start date'));
+    }
     return next();
 });
 
