@@ -256,28 +256,28 @@ processes recorded by that launch.
 
 ### Raspberry Pi touchscreen startup
 
-The Pi uses its existing Python virtual environment and `node_modules`; this
-setup does not reinstall dependencies. It serves the local touchscreen frontend
-through Nginx and runs the backend and station gateway as systemd services.
-The Vercel website remains separate.
+The Pi only runs the local camera, AI, and ESP32 gateway. The frontend and
+backend remain on Vercel. This setup uses the existing `.venv` and does not
+reinstall dependencies or run local Node services.
 
-After pulling the latest code, stop any manually started backend or gateway,
-wait until the station is idle, and run this **once** as the normal Pi user:
+Configure `.env.station` with the deployed API as `TQ_BACKEND_URL` and the
+matching `TQ_DEVICE_KEY`. After pulling the latest code, stop any manually
+started gateway, wait until the station is idle, and run this **once** as the
+normal Pi desktop user:
 
 ```bash
 cd /home/trashquest/TrashQuest-latest
 bash scripts/pi/setup-autostart.sh
 ```
 
-The setup builds/copies the local frontend, installs the backend and gateway
-services, enables Nginx and both services at boot, and creates **TrashQuest
-Start**, **TrashQuest Stop**, and **TrashQuest Open** icons on the Pi desktop.
-It asks for `sudo` during this one-time setup. The Start/Stop icons can then
-operate those three named services without a keyboard. **Stop refuses while a
-disposal is in progress**; wait for the station to return to idle and tap it
-again. At desktop login, the default browser opens `http://127.0.0.1/`.
-Set Raspberry Pi OS to desktop auto-login if the browser should open after a
-reboot without anyone logging in.
+The setup creates **TrashQuest Start**, **TrashQuest Stop**, and **TrashQuest
+Open** icons on the Pi desktop and enables the gateway for that user's login.
+It needs no `sudo`. Start launches the gateway and opens
+`https://trashquest-web.vercel.app/`; Stop stops only the gateway. **Stop
+refuses while a disposal is in progress**; wait for the station to return to
+idle and tap it again. At desktop login, the default browser opens the Vercel
+website. Set Raspberry Pi OS to desktop auto-login for unattended touchscreen
+startup. Internet access is required for the deployed website and API.
 
 To start or stop from a terminal instead:
 
@@ -286,11 +286,10 @@ bash scripts/pi/start-trashquest.sh
 bash scripts/pi/stop-trashquest.sh
 ```
 
-After later code pulls, run `bash scripts/pi/setup-autostart.sh` again while
-the station is idle to rebuild the local frontend and restart services.
-If startup fails, inspect `sudo journalctl -u trashquest-gateway -u
-trashquest-backend -n 80 --no-pager`. A `git pull` alone does not restart a
-running Python gateway.
+After later code pulls, stop and start the gateway while idle to load the new
+Python code. If startup fails, inspect
+`journalctl --user -u trashquest-gateway -n 80 --no-pager`. A `git pull` alone
+does not restart a running gateway.
 
 ## Security notes
 

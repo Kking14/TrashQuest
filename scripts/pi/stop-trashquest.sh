@@ -13,11 +13,9 @@ if [[ -n "$state" && "$state" != 'IDLE' ]]; then
   notice "Station is $state. Wait until sorting finishes before stopping."
   exit 1
 fi
-if [[ -z "$state" ]] && systemctl is-active --quiet trashquest-gateway.service; then
+if [[ -z "$state" ]] && systemctl --user is-active --quiet trashquest-gateway.service; then
   notice 'Gateway is running, but its safety state is unavailable. Check the station before stopping it.'
   exit 1
 fi
-sudo -n systemctl stop trashquest-gateway.service
-sudo -n systemctl stop trashquest-backend.service
-sudo -n systemctl stop nginx.service
-notice 'TrashQuest stopped.'
+systemctl --user stop trashquest-gateway.service
+notice 'Station gateway stopped. The Vercel website remains online.'
