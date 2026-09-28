@@ -1,4 +1,21 @@
 import User from '../models/userModel.js';
+import { createHash, randomInt } from 'node:crypto';
+
+const resetAlphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const hashResetCode = (code) => createHash('sha256').update(code).digest('hex');
+
+const issuePasswordResetCode = async (userID) => {
+    const user = await User.findById(userID).select('role status');
+    if (!user || user.role !== 'user' || user.status !== 'active') {
+        throw new Error('An active resident account is required');
+    }
+    const code = Array.from({ length: 12 }, () => resetAlphabet[randomInt(resetAlphabet.length)]).join('');
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+    await User.findByIdAndUpdate(userID, {
+        $set: { passwordResetCodeHash: hashResetCode(code), passwordResetExpiresAt: expiresAt },
+    });
+    return { code, expiresAt };
+};
 
 const getAllUsers = async ({ page = 1, limit = 500, search = '', sortBy = 'name', sortOrder = 'asc' } = {}) => {
     const safePage = Math.max(1, Number(page) || 1);
@@ -51,4 +68,4 @@ const deleteUser = async (userID) => {
     return user;
 }
 
-export { getAllUsers, getUserById, updateUser, deleteUser };
+export { getAllUsers, getUserById, updateUser, deleteUser, issuePasswordResetCode, hashResetCode };

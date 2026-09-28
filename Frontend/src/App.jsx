@@ -458,15 +458,17 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
   const [mode, setMode] = useState('login');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [registrationPassword, setRegistrationPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const passwordStrength = getPasswordStrength(registrationPassword);
 
   async function handleSubmit(event) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const body = Object.fromEntries(form.entries());
-    if (mode === 'register' && registrationPassword !== confirmPassword) {
+    if (mode !== 'login' && registrationPassword !== confirmPassword) {
       setNotice('Passwords do not match.');
       return;
     }
@@ -474,6 +476,15 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
     setNotice('');
 
     try {
+      if (mode === 'forgot') {
+        await apiRequest('/api/auth/reset-password', { method: 'POST', body: { email: body.email, code: body.code, newPassword: registrationPassword } });
+        setNotice('Password reset. You can sign in now.');
+        setMode('login');
+        setRegistrationPassword('');
+        setConfirmPassword('');
+        formElement.reset();
+        return;
+      }
       const response = await apiRequest(`/api/auth/${mode}`, { method: 'POST', body });
       if (mode === 'login') {
         onLogin(response.data);
@@ -482,7 +493,7 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
         setMode('login');
         setRegistrationPassword('');
         setConfirmPassword('');
-        event.currentTarget.reset();
+        formElement.reset();
       }
     } catch (error) {
       setNotice(error.message);
@@ -522,17 +533,17 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
         <form className="auth-form" onSubmit={handleSubmit}>
           <div className="auth-form-heading">
             <p className="eyebrow">Resident portal</p>
-            <h2>{mode === 'login' ? 'Welcome back' : 'Create your account'}</h2>
-            <p>{mode === 'login' ? 'Sign in to view your points and quests.' : 'Register to start earning rewards for recycling.'}</p>
+            <h2>{mode === 'login' ? 'Welcome back' : mode === 'register' ? 'Create your account' : 'Reset your password'}</h2>
+            <p>{mode === 'login' ? 'Sign in to view your points and quests.' : mode === 'register' ? 'Register to start earning rewards for recycling.' : 'Ask a barangay admin for a one-time reset code. It expires after 15 minutes.'}</p>
           </div>
-          <div className="segmented">
+          {mode !== 'forgot' && <div className="segmented">
             <button type="button" className={mode === 'login' ? 'active' : ''} onClick={() => setMode('login')}>
               Login
             </button>
             <button type="button" className={mode === 'register' ? 'active' : ''} onClick={() => setMode('register')}>
               Register
             </button>
-          </div>
+          </div>}
 
           {mode === 'register' && (
             <div className="registration-name-grid">
@@ -555,20 +566,21 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
             Email
             <input name="email" type="email" placeholder="you@example.com" required />
           </label>
-          <label>
+          {mode === 'forgot' && <label>One-time reset code<input name="code" autoComplete="one-time-code" maxLength={16} placeholder="Code from your barangay admin" required /></label>}
+          {mode !== 'forgot' && <label>
             Password
             {mode === 'register' ? (
               <>
-                <input
+                <div className="password-field"><input
                   name="password"
-                  type="password"
+                  type={showPassword ? 'text' : 'password'}
                   minLength={8}
                   value={registrationPassword}
                   onChange={(event) => setRegistrationPassword(event.target.value)}
                   placeholder="At least 8 characters"
                   autoComplete="new-password"
                   required
-                />
+                /><button type="button" className="password-toggle" onClick={() => setShowPassword((current) => !current)} aria-label={showPassword ? 'Hide password' : 'Show password'}>{showPassword ? 'Hide' : 'Show'}</button></div>
                 <div className={`password-strength ${passwordStrength.tone}`}>
                   <div>{[1, 2, 3, 4, 5].map((step) => <i key={step} className={step <= passwordStrength.score ? 'filled' : ''} />)}</div>
                   <span>{passwordStrength.label}</span>
@@ -576,16 +588,18 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
                 <small className="password-hint">Use uppercase, lowercase, a number, and preferably a symbol.</small>
               </>
             ) : (
-              <input name="password" type="password" placeholder="Your password" autoComplete="current-password" required />
+              <div className="password-field"><input name="password" type={showPassword ? 'text' : 'password'} placeholder="Your password" autoComplete="current-password" required /><button type="button" className="password-toggle" onClick={() => setShowPassword((current) => !current)} aria-label={showPassword ? 'Hide password' : 'Show password'}>{showPassword ? 'Hide' : 'Show'}</button></div>
             )}
-          </label>
+          </label>}
 
-          {mode === 'register' && (
+          {mode === 'forgot' && <label>New password<div className="password-field"><input name="newPassword" type={showPassword ? 'text' : 'password'} minLength={8} value={registrationPassword} onChange={(event) => setRegistrationPassword(event.target.value)} autoComplete="new-password" required /><button type="button" className="password-toggle" onClick={() => setShowPassword((current) => !current)}>{showPassword ? 'Hide' : 'Show'}</button></div></label>}
+
+          {mode !== 'login' && (
             <label>
               Confirm password
               <input
                 name="confirmPassword"
-                type="password"
+                type={showPassword ? 'text' : 'password'}
                 minLength={8}
                 value={confirmPassword}
                 onChange={(event) => setConfirmPassword(event.target.value)}
@@ -603,8 +617,10 @@ function AuthScreen({ onLogin, onOpenBinDisplay }) {
 
           {notice && <div className="notice compact">{notice}</div>}
           <button type="submit" className="primary-button" disabled={busy}>
-            {busy ? 'Working...' : mode === 'login' ? 'Sign in' : 'Create account'}
+            {busy ? 'Working...' : mode === 'login' ? 'Sign in' : mode === 'register' ? 'Create account' : 'Reset password'}
           </button>
+          {mode === 'login' && <button type="button" className="text-button" onClick={() => { setNotice(''); setMode('forgot'); }}>Forgot password?</button>}
+          {mode === 'forgot' && <button type="button" className="text-button" onClick={() => { setNotice(''); setMode('login'); }}>Back to login</button>}
         </form>
       </section>
     </main>
@@ -1118,9 +1134,8 @@ function BinDisplayDashboard({ onExit }) {
     <main className={`bin-display-shell kiosk-state-${displayState}${displayState === 'ready' && notice ? ' has-ready-notice' : ''}`} onPointerDownCapture={wakeKiosk} onKeyDownCapture={wakeKiosk}>
       <header className="kiosk-header">
         <div className="kiosk-brand"><span>TQ</span><strong>TrashQuest</strong></div>
-        <div className="station-status"><i /> {gatewayOnline ? 'Hardware connected' : 'Test mode'}</div>
+        <div className="station-status"><i /> {gatewayOnline ? 'Hardware connected' : 'Gateway offline'}</div>
         <div className="kiosk-header-actions">
-          {(gatewaySimulation || !gatewayOnline) && canPreviewIdle && <button type="button" className="kiosk-preview" onClick={() => { setIdleStep(0); setIdlePreview(true); }}>Preview slideshow</button>}
           <button type="button" className="kiosk-exit" onClick={exitDisplay}>Exit display</button>
         </div>
       </header>
@@ -1188,6 +1203,7 @@ function BinDisplayDashboard({ onExit }) {
             <p className="kiosk-kicker">Smart waste station</p>
             <h1>{binFull ? 'Bin temporarily unavailable' : 'Place paper or plastic bottles on the platform'}</h1>
             <p>{binFull ? 'This bin is full and needs collection.' : `Place one waste type at a time. The AI counts visible papers or bottles and sorts the batch automatically. ${['yolo26n-tincan-ncnn', 'yolo26s-tincan-onnx'].includes(activeModel) ? 'Tin cans can be grouped when the camera confirms a stable count.' : 'Tin cans go one at a time.'} Paper: 5 points · Plastic: 10 points · Tin can: 15 points.`}</p>
+            {!binFull && <p className="tin-can-notice">For tin cans: remove paper labels or wrappers first so the AI can identify the can more accurately.</p>}
           </div>
         )}
 
@@ -1196,7 +1212,7 @@ function BinDisplayDashboard({ onExit }) {
             <div className="scanner-orb"><span>{detectedItem?.icon}</span><i /></div>
             <p className="kiosk-kicker">{metalCountdown !== null ? 'Metal detected' : 'AI scanning'}</p>
             <h1>{metalCountdown !== null ? `Add other tin cans now · ${metalCountdown}s` : 'Analyzing the platform…'}</h1>
-            <p>{metalCountdown !== null ? 'Keep the cans separate and still. The metal sensor has confirmed the batch; the motor will wait until the camera finishes counting.' : 'Keep the item still while its waste type is identified.'}</p>
+            <p>{metalCountdown !== null ? 'Remove paper labels or wrappers from tin cans. Keep the cans separate and still while the camera finishes counting.' : 'Keep the item still while its waste type is identified.'}</p>
             <div className="scan-progress"><i /></div>
           </div>
         )}
@@ -1248,22 +1264,9 @@ function BinDisplayDashboard({ onExit }) {
             {notice && !claim && (
               <div className="qr-error-actions">
                 <div className="kiosk-error">{notice}</div>
-                <button
-                  type="button"
-                  className="kiosk-primary"
-                  onClick={() => {
-                    localStorage.removeItem('trashquest_bin_device_key');
-                    setDeviceKey('');
-                    finishSession({ testMode: true });
-                  }}
-                  disabled={busy}
-                >
-                  Generate test QR instead
-                </button>
                 <button type="button" className="kiosk-secondary" onClick={() => setDisplayState('recognized')}>
                   Go back and retry
                 </button>
-                <small>Test QR codes verify the screen only and cannot award resident points.</small>
               </div>
             )}
             {claim?.claims?.length > 0 && (
@@ -1300,27 +1303,6 @@ function BinDisplayDashboard({ onExit }) {
           <strong>{estimatedTotalPoints} pts</strong>
         </aside>
       )}
-
-      <aside className="hardware-test-panel">
-        <span>Simulation controls</span>
-        <div>
-          {binWasteOptions.map((option) => (
-            <button
-              type="button"
-              key={option.value}
-              onClick={() => fetch('http://127.0.0.1:8765/simulate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ wasteType: option.value, itemCount: 1, confidence: 0.9 }),
-              }).catch(() => setNotice('Start the gateway with --simulate first.'))}
-              disabled={!gatewaySimulation || displayState !== 'ready' || binFull}
-            >
-              {option.icon} Simulate {option.label}
-            </button>
-          ))}
-        </div>
-        <small>{gatewaySimulation ? 'No hardware is being controlled.' : 'Start station_gateway.py --simulate to enable.'}</small>
-      </aside>
 
       {showIdleScreen && (
         <section className="kiosk-idle-screen" aria-label="How TrashQuest works">
@@ -2212,7 +2194,8 @@ function AdminQuestTools({ quests, token, runAction, loading }) {
 
   async function saveQuest(event) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const wasteType = form.get('wasteType');
     const targetCount = form.get('targetCount') ? Number(form.get('targetCount')) : null;
     if (!targetCount) {
@@ -2240,9 +2223,10 @@ function AdminQuestTools({ quests, token, runAction, loading }) {
       editingQuest ? 'Quest updated' : 'Quest created'
     );
     if (result) {
-      event.currentTarget.reset();
+      formElement.reset();
       setShowAddModal(false);
       setEditingQuest(null);
+      setQuestTab('current');
     }
   }
 
@@ -2691,6 +2675,8 @@ function QuestView({ quests, session, admin = false, history = false, onEdit, on
 
 function RewardView({ rewards, redemptions, points, token, runAction, onScan, onRefresh, loading }) {
   const [selectedReward, setSelectedReward] = useState(null);
+  const [redeeming, setRedeeming] = useState(false);
+  const redeemingRef = useRef(false);
   const [newRedemption, setNewRedemption] = useState(null);
   const [rewardTab, setRewardTab] = useState('browse');
   const [catalogSearch, setCatalogSearch] = useState('');
@@ -2724,22 +2710,29 @@ function RewardView({ rewards, redemptions, points, token, runAction, onScan, on
   }
 
   async function confirmRedemption() {
-    if (!selectedReward || !canAffordSelected) return;
-    const result = await runAction(
-      () => apiRequest(`/api/rewards/${selectedReward._id}/redeem`, { method: 'POST', token }),
-      'Reward redeemed'
-    );
-    if (result) {
-      setSelectedReward(null);
-      setNewRedemption({ ...result.data, rewardName: selectedReward.name });
-      setRewardTab('pickups');
-    } else {
-      try {
-        const profile = await apiRequest('/api/auth/me', { token });
-        setVerifiedPoints(Number(profile.data?.points || 0));
-      } catch {
-        // Keep the last verified balance if the refresh is unavailable.
+    if (!selectedReward || !canAffordSelected || redeemingRef.current) return;
+    redeemingRef.current = true;
+    setRedeeming(true);
+    try {
+      const result = await runAction(
+        () => apiRequest(`/api/rewards/${selectedReward._id}/redeem`, { method: 'POST', token }),
+        'Reward redeemed'
+      );
+      if (result) {
+        setSelectedReward(null);
+        setNewRedemption({ ...result.data, rewardName: selectedReward.name });
+        setRewardTab('pickups');
+      } else {
+        try {
+          const profile = await apiRequest('/api/auth/me', { token });
+          setVerifiedPoints(Number(profile.data?.points || 0));
+        } catch {
+          // Keep the last verified balance if the refresh is unavailable.
+        }
       }
+    } finally {
+      redeemingRef.current = false;
+      setRedeeming(false);
     }
   }
 
@@ -2845,7 +2838,7 @@ function RewardView({ rewards, redemptions, points, token, runAction, onScan, on
             {!canAffordSelected && <p className="form-error">You do not have enough points for this reward.</p>}
             <div className="reward-confirmation-actions">
               <button type="button" className="secondary-button" onClick={() => setSelectedReward(null)}>Cancel</button>
-              <button type="button" className="primary-button" disabled={!canAffordSelected} onClick={confirmRedemption}>Yes, redeem reward</button>
+          <button type="button" className="primary-button" disabled={!canAffordSelected || redeeming} onClick={confirmRedemption}>{redeeming ? 'Redeeming…' : 'Yes, redeem reward'}</button>
             </div>
           </div>
         </Modal>
@@ -2870,6 +2863,7 @@ function AdminRedemptions({ rewards, token, runAction }) {
   const [lookupError, setLookupError] = useState('');
   const [searching, setSearching] = useState(false);
   const [claiming, setClaiming] = useState(false);
+  const claimingRef = useRef(false);
 
   async function findCode(event) {
     event.preventDefault();
@@ -2890,7 +2884,8 @@ function AdminRedemptions({ rewards, token, runAction }) {
   }
 
   async function confirmHandover() {
-    if (!found || found.status !== 'pending' || claiming) return;
+    if (!found || found.status !== 'pending' || claimingRef.current) return;
+    claimingRef.current = true;
     setClaiming(true);
     try {
       const result = await runAction(
@@ -2899,8 +2894,20 @@ function AdminRedemptions({ rewards, token, runAction }) {
         }),
         'Reward handover confirmed'
       );
-      if (result) setFound(result.data);
+      if (result) {
+        setFound(result.data);
+      } else {
+        try {
+          const latest = await apiRequest('/api/rewards/redemptions/lookup', {
+            method: 'POST', token, body: { pickupCode: found.pickupCode },
+          });
+          setFound(latest.data);
+        } catch {
+          // Keep the lookup visible so the admin can retry it.
+        }
+      }
     } finally {
+      claimingRef.current = false;
       setClaiming(false);
     }
   }
@@ -2932,7 +2939,7 @@ function AdminRedemptions({ rewards, token, runAction }) {
           <p><strong>Redeemed:</strong> {new Date(found.redeemedAt).toLocaleString()} · {found.pointsSpent} pts</p>
           {found.status === 'pending' && <button type="button" className="primary-button" onClick={confirmHandover} disabled={claiming || !found.resident}>{claiming ? 'Confirming…' : 'Confirm handover'}</button>}
           {found.status === 'pending' && !found.resident && <p className="form-error">Resident record was not found. Do not hand over this reward until the account is verified.</p>}
-          {found.status === 'claimed' && <p>This code cannot be claimed again.</p>}
+          {found.status === 'claimed' && <p>This code was marked collected{found.claimedAt ? ` on ${new Date(found.claimedAt).toLocaleString()}` : ''}. If the resident has not received the reward, check the pickup record before handing it over.</p>}
         </div>
       )}
       <div className="table-wrap">
@@ -2967,6 +2974,7 @@ function AdminRedemptions({ rewards, token, runAction }) {
 
 function AdminUsers({ users, token, runAction }) {
   const [search, setSearch] = useState('');
+  const [resetDetails, setResetDetails] = useState(null);
   const [sort, setSort] = useState({ key: 'name', direction: 'asc' });
   const [page, setPage] = useState(1);
   const pageSize = 10;
@@ -2987,6 +2995,15 @@ function AdminUsers({ users, token, runAction }) {
 
   function changeSort(key) {
     setSort((current) => ({ key, direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc' }));
+  }
+
+  async function issueResetCode(user) {
+    if (!window.confirm(`Issue a 15-minute password reset code for ${user.name}? Verify the resident's identity before sharing it.`)) return;
+    const result = await runAction(
+      () => apiRequest(`/api/users/${user._id}/password-reset`, { method: 'POST', token }),
+      'Reset code issued'
+    );
+    if (result) setResetDetails({ name: user.name, ...result.data });
   }
 
   return (
@@ -3026,19 +3043,18 @@ function AdminUsers({ users, token, runAction }) {
                 <td>{user.points || 0}</td>
                 <td>{user.status}</td>
                 <td>
-                  <button
-                    type="button"
-                    className="danger-button small"
-                    disabled={user.status === 'inactive'}
-                    onClick={() =>
-                      runAction(
-                        () => apiRequest(`/api/users/${user._id}`, { method: 'DELETE', token }),
-                        'User deactivated'
-                      )
-                    }
-                  >
-                    Deactivate
-                  </button>
+                  {user.status === 'active' && user.role !== 'admin' && <button type="button" className="secondary-button small" onClick={() => issueResetCode(user)}>Reset password</button>}
+                  {user.status === 'inactive' ? (
+                    <button type="button" className="secondary-button small" onClick={() => runAction(
+                      () => apiRequest(`/api/users/${user._id}`, { method: 'PUT', token, body: { status: 'active' } }),
+                      'User reactivated'
+                    )}>Reactivate</button>
+                  ) : (
+                    <button type="button" className="danger-button small" onClick={() => runAction(
+                      () => apiRequest(`/api/users/${user._id}`, { method: 'DELETE', token }),
+                      'User deactivated'
+                    )}>Deactivate</button>
+                  )}
                 </td>
               </tr>
             ))}
@@ -3046,6 +3062,12 @@ function AdminUsers({ users, token, runAction }) {
           </tbody>
         </table>
       </div>
+      {resetDetails && <Modal title="One-time password reset code" eyebrow={resetDetails.name} onClose={() => setResetDetails(null)}>
+        <p>Share this code with the verified resident. It expires in 15 minutes and is shown only here.</p>
+        <strong className="reset-code">{resetDetails.code}</strong>
+        <p>The resident can select “Forgot password?” on the login page and enter their email, this code, and a new password.</p>
+        <button type="button" className="primary-button" onClick={() => setResetDetails(null)}>Done</button>
+      </Modal>}
       <div className="pagination">
         <button type="button" className="secondary-button small" disabled={safePage === 1} onClick={() => setPage(safePage - 1)}>Previous</button>
         <span>Page {safePage} of {totalPages}</span>

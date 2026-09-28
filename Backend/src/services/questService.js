@@ -36,10 +36,6 @@ const listActiveQuests = async (req) => {
             {
                 status: 'active',
                 expiryDate: mongoose.trusted({ $gte: now }),
-                $or: [
-                    { startDate: mongoose.trusted({ $exists: false }) },
-                    { startDate: mongoose.trusted({ $lte: now }) },
-                ],
             },
             {
                 participants: mongoose.trusted({

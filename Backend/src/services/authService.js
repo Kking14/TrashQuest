@@ -1,6 +1,7 @@
 import User from '../models/userModel.js';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { hashResetCode } from './userService.js';
 
 const registerUser = async (userData) => {
     const { firstName, lastName, middleInitial, email, password } = userData;
@@ -57,4 +58,26 @@ const loginUser = async (email, password) => {
     return { user, token };
 };
 
-export { registerUser, loginUser };
+const resetPasswordWithCode = async (email, code, newPassword) => {
+    const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+    const normalizedCode = typeof code === 'string' ? code.trim().toUpperCase().replace(/[\s-]/g, '') : '';
+    if (!normalizedEmail || !/^[A-HJ-NP-Z2-9]{12}$/.test(normalizedCode)) {
+        throw new Error('Invalid or expired reset code');
+    }
+    const password = await bcrypt.hash(newPassword, 10);
+    const user = await User.findOneAndUpdate(
+        {
+            email: normalizedEmail,
+            status: 'active',
+            passwordResetCodeHash: hashResetCode(normalizedCode),
+            passwordResetExpiresAt: { $gt: new Date() },
+        },
+        {
+            $set: { password },
+            $unset: { passwordResetCodeHash: 1, passwordResetExpiresAt: 1 },
+        }
+    );
+    if (!user) throw new Error('Invalid or expired reset code');
+};
+
+export { registerUser, loginUser, resetPasswordWithCode };
