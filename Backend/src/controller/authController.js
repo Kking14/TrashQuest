@@ -1,4 +1,4 @@
-import { registerUser, loginUser } from '../services/authService.js';
+import { registerUser, loginUser, resetPasswordWithCode } from '../services/authService.js';
 import bcrypt from 'bcryptjs';
 import User from '../models/userModel.js';
 import { getPasswordPolicyErrors } from '../utils/passwordPolicy.js';
@@ -136,10 +136,25 @@ const updatePassword = async (req, res) => {
     }
 };
 
+const resetPassword = async (req, res) => {
+    try {
+        const { email, code, newPassword } = req.body || {};
+        const passwordErrors = getPasswordPolicyErrors(newPassword);
+        if (passwordErrors.length > 0) {
+            return res.status(400).json({ success: false, errors: passwordErrors });
+        }
+        await resetPasswordWithCode(email, code, newPassword);
+        return res.status(200).json({ success: true, message: 'Password reset. You can sign in now.' });
+    } catch (error) {
+        return res.status(400).json({ success: false, message: error.message });
+    }
+};
+
 export {
     registerAccount,
     loginAccount,
     logoutAccount,
     getProfile,
     updatePassword,
+    resetPassword,
 };

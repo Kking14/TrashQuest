@@ -1,4 +1,4 @@
-import { getAllUsers, getUserById, updateUser, deleteUser } from '../services/userService.js';
+import { getAllUsers, getUserById, updateUser, deleteUser, issuePasswordResetCode } from '../services/userService.js';
 
 const listUsers = async (req, res) => {
     try {
@@ -43,4 +43,13 @@ const removeUser = async (req, res) => {
     }
 };
 
-export { listUsers, getUser, editUser, removeUser };
+const issuePasswordReset = async (req, res) => {
+    try {
+        const data = await issuePasswordResetCode(req.params.id);
+        res.status(200).json({ success: true, data });
+    } catch (error) {
+        res.status(400).json({ success: false, message: error.message });
+    }
+};
+
+export { listUsers, getUser, editUser, removeUser, issuePasswordReset };

@@ -1361,6 +1361,11 @@ th {
 .password-strength { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px; margin-top: 2px; }
 .password-strength > div { display: grid; grid-template-columns: repeat(5,1fr); gap: 5px; }.password-strength i { height: 5px; border-radius: 999px; background: #e3e9e5; transition: background .18s ease; }.password-strength span { min-width: 70px; color: var(--muted); font-size: .72rem; font-weight: 900; text-align: right; }.password-strength.weak i.filled { background: #d95548; }.password-strength.fair i.filled { background: #e3a02f; }.password-strength.strong i.filled { background: #5aaa62; }.password-strength.very-strong i.filled { background: #1f8a5b; }
 .password-hint,.password-match { color: #7a8780; font-size: .72rem; font-weight: 650; line-height: 1.4; }.password-match.valid { color: #1f7a4e; }.password-match.invalid { color: #b33d33; }
+.password-field { display: flex; align-items: stretch; gap: 8px; }
+.password-field input { flex: 1; min-width: 0; }
+.password-toggle { min-width: 60px; border: 1px solid #b9cbbf; border-radius: 10px; background: #f3f8f4; color: #15372a; font-weight: 800; cursor: pointer; }
+.tin-can-notice { margin-top: 18px; padding: 12px 16px; border: 1px solid rgba(255, 208, 128, .7); border-radius: 12px; background: rgba(80, 54, 28, .9); color: #fff3d8; font-weight: 800; }
+.reset-code { display: block; padding: 14px 18px; border: 1px solid #b9cbbf; border-radius: 12px; background: #f3f8f4; color: #15372a; font-size: 1.5rem; letter-spacing: .18em; text-align: center; }
 
 .auth-page::before,
 .auth-page::after {
