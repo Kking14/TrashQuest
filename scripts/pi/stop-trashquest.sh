@@ -7,7 +7,7 @@ notice() {
     notify-send TrashQuest "$*" || true
   fi
 }
-# Avoid interrupting motor movement or an unfinished disposal.
+# Keep all three services running during an active disposal.
 state="$("$ROOT/.venv/bin/python" -c 'import json, urllib.request; print(json.load(urllib.request.urlopen("http://127.0.0.1:8765/health", timeout=2)).get("workflowState", "UNKNOWN"))' 2>/dev/null || true)"
 if [[ -n "$state" && "$state" != 'IDLE' ]]; then
   notice "Station is $state. Wait until sorting finishes before stopping."
@@ -18,4 +18,6 @@ if [[ -z "$state" ]] && systemctl --user is-active --quiet trashquest-gateway.se
   exit 1
 fi
 systemctl --user stop trashquest-gateway.service
-notice 'Station gateway stopped. The Vercel website remains online.'
+systemctl --user stop trashquest-frontend.service
+systemctl --user stop trashquest-backend.service
+notice 'TrashQuest gateway, frontend, and backend stopped.'

@@ -256,14 +256,16 @@ processes recorded by that launch.
 
 ### Raspberry Pi touchscreen startup
 
-The Pi only runs the local camera, AI, and ESP32 gateway. The frontend and
-backend remain on Vercel. This setup uses the existing `.venv` and does not
-reinstall dependencies or run local Node services.
+Like the Windows command files, the Pi Start and Stop shortcuts manage the
+local backend, frontend, and camera/ESP32 gateway together. They reuse the
+existing `.venv` and `node_modules`; setup does not reinstall dependencies.
+The Vercel deployments remain available separately.
 
-Configure `.env.station` with the deployed API as `TQ_BACKEND_URL` and the
-matching `TQ_DEVICE_KEY`. After pulling the latest code, stop any manually
-started gateway, wait until the station is idle, and run this **once** as the
-normal Pi desktop user:
+Configure `Backend/.env` and `.env.station` as you do for the Windows launcher.
+In particular, the gateway needs the correct `TQ_BACKEND_URL`,
+`TQ_DEVICE_KEY`, and `TQ_SERIAL_PORT` for this Pi. After pulling the latest
+code, stop any manually started frontend, backend, or gateway, wait until the
+station is idle, and run this **once** as the normal Pi desktop user:
 
 ```bash
 cd /home/trashquest/TrashQuest-latest
@@ -271,25 +273,27 @@ bash scripts/pi/setup-autostart.sh
 ```
 
 The setup creates **TrashQuest Start**, **TrashQuest Stop**, and **TrashQuest
-Open** icons on the Pi desktop and enables the gateway for that user's login.
-It needs no `sudo`. Start launches the gateway and opens
-`https://trashquest-web.vercel.app/`; Stop stops only the gateway. **Stop
+Open** icons on the Pi desktop and enables all three services for that user's
+login.
+It needs no `sudo`. Start launches all three services, waits for them to
+respond, and opens `http://127.0.0.1:5173/`. Stop stops all three. **Stop
 refuses while a disposal is in progress**; wait for the station to return to
-idle and tap it again. At desktop login, the default browser opens the Vercel
-website. Set Raspberry Pi OS to desktop auto-login for unattended touchscreen
-startup. Internet access is required for the deployed website and API.
+idle and tap it again. At desktop login, Start runs automatically and opens
+the local website after the services are ready. Set Raspberry Pi OS to desktop
+auto-login for unattended touchscreen startup. Internet access is still needed
+for any configured cloud API or database.
 
 To start or stop from a terminal instead:
 
 ```bash
-bash scripts/pi/start-trashquest.sh
-bash scripts/pi/stop-trashquest.sh
+bash start-trashquest-pi.sh
+bash stop-trashquest-pi.sh
 ```
 
-After later code pulls, stop and start the gateway while idle to load the new
-Python code. If startup fails, inspect
-`journalctl --user -u trashquest-gateway -n 80 --no-pager`. A `git pull` alone
-does not restart a running gateway.
+After later code pulls, stop and start TrashQuest while idle to load new code.
+If startup fails, inspect `journalctl --user -u trashquest-backend -u
+trashquest-frontend -u trashquest-gateway -n 80 --no-pager`. A `git pull`
+alone does not restart running services.
 
 ## Security notes
 
