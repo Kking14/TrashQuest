@@ -38,7 +38,8 @@ const rewardSchema = new mongoose.Schema({
     },
     description: {
         type: String,
-        default: null,
+        required: [true, 'Description is required'],
+        trim: true,
     },
     imageData: {
         type: Buffer,
