@@ -8,7 +8,7 @@ The web platform includes interfaces for residents, barangay administrators, and
 
 1. A resident places one waste type on the platform (plastic bottles should be crushed first).
 2. YOLO identifies paper and plastic bottles inside the platform ROI; the inductive sensor identifies tin cans.
-3. The ESP32 automatically sorts the detected item without resident confirmation. Each successful cycle adds the stable AI batch count to the session; inductive tin cans count one at a time.
+3. The ESP32 automatically sorts the detected item without resident confirmation. Paper and plastic use the stable AI batch count. Tin cans count one at a time with older models; the dedicated tin-can models use an inductive-triggered camera count after a five-second collection window.
 4. Only a matching successful `sorted` acknowledgement creates a claim and its QR/session code.
 5. The resident scans the QR code or enters the code in the resident portal.
 6. Points and eligible daily or weekly quest progress are updated.
@@ -177,9 +177,11 @@ and the firmware guard against metal during a paper/plastic sort. A conflict
 detected after motion starts requests a stop; it cannot undo completed motion.
 
 Plastic is explicitly recognized by a configured YOLO class. The Sharp sensor
-is no longer a classification authority. The GPIO 26 inductive sensor directly
-classifies a single Tin Can without requiring an AI detection, while the
-ultrasonic sensor is dedicated to fullness.
+is no longer a classification authority. The GPIO 26 inductive sensor confirms
+metal. With an older model it classifies one Tin Can without an AI detection.
+With a dedicated tin-can model, the camera must confirm a stable count before
+sorting; ambiguous or mixed detections stop the cycle. The ultrasonic sensors
+are dedicated to fullness.
 After a Tin Can is sorted, GPIO 26 must remain inactive for 350 ms; the ESP32
 then reports the platform empty and enables the kiosk's next-batch button.
 Rewards and quest progress use the number of successfully sorted items in the resident session. Optional
@@ -297,6 +299,8 @@ classification thresholds, and sorting still depend on AI results.
 ## Metal association and two bin sensors
 
 The inductive sensor identifies metal. The gateway matches one AI box covering the sensor and labels that object "Metal detected via inductive sensor". Additional visible objects still block sorting; ambiguous matches also block. The match is held through the active metal transaction using box overlap. This does not retrain the model or guarantee detection of hidden/overlapping objects.
+
+The model menu also offers **YOLO26n tin cans · NCNN (Pi)** and **YOLO26s tin cans · ONNX (laptop)**. These two models enable batch counting: the inductive sensor starts a five-second collection countdown, then the can may move away from the sensor. The camera must see 1–5 separate `metal` boxes with an unchanged count for at least three recent frames. Any separate paper/plastic detection, overlapping metal boxes, stale camera reading, or changing count cancels the sort before the motor moves. Older models retain one-can-at-a-time behavior. This needs physical testing with the station's own cans; hidden or overlapping cans cannot be counted reliably. Upload the updated ESP32 sketch because its AI-wait timeout is longer for the countdown.
 
 Set `TQ_INDUCTIVE_ROI=0.53,0.41,0.59,0.49` in `.env.station` if calibration is needed (this is also the default). Coordinates are normalized against the full camera frame, not the platform ROI. The purple METAL SENSOR rectangle should surround the blue sensor. Recalibrate if the camera moves. Let the camera run before placing one can over the sensor. Confirm the overlay, then test a can beside paper/plastic: sorting must stay blocked.
 
