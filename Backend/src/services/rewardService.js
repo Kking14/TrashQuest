@@ -18,29 +18,10 @@ const getAllRewards = async ({ includeRedemptions = false } = {}) => {
 };
  
 const updateReward = async (rewardID, updateData) => {
-    if (typeof updateData.description !== 'string' || !updateData.description.trim()) {
-        throw new Error('Description is required');
-    }
-    const allowedFields = ['name', 'description', 'pointsCost', 'stock', 'status'];
-    const updates = Object.fromEntries(
-        allowedFields
-            .filter((field) => Object.prototype.hasOwnProperty.call(updateData, field))
-            .map((field) => [field, updateData[field]])
-    );
-    const reward = await Reward.findByIdAndUpdate(rewardID, updates, { new: true, runValidators: true });
+    const reward = await Reward.findByIdAndUpdate(rewardID, updateData, { new: true });
     if (!reward) {
         throw new Error('Reward not found');
     }
-    return reward;
-};
-
-const deleteReward = async (rewardID) => {
-    const reward = await Reward.findById(rewardID).select('name redemptions');
-    if (!reward) throw new Error('Reward not found');
-    if (reward.redemptions?.length) {
-        throw new Error('This reward has redemption history and cannot be deleted. Set it to inactive instead.');
-    }
-    await Reward.findByIdAndDelete(rewardID);
     return reward;
 };
 
@@ -126,9 +107,7 @@ const ensurePickupCode = async (rewardID, redemptionID, userID) => {
     const reward = await Reward.findOneAndUpdate(
         {
             _id: rewardID,
-            redemptions: mongoose.trusted({
-                $elemMatch: { _id: redemptionID, user: userID, status: 'pending', pickupCode: null },
-            }),
+            redemptions: { $elemMatch: { _id: redemptionID, user: userID, status: 'pending', pickupCode: null } },
         },
         { $set: { 'redemptions.$.pickupCode': generatePickupCode() } },
         { new: true }
@@ -164,21 +143,17 @@ const lookupRedemptionByCode = async (value) => {
 const claimRedemptionByCode = async (value) => {
     const pickupCode = normalizePickupCode(value);
     const reward = await Reward.findOneAndUpdate(
-        {
-            redemptions: mongoose.trusted({
-                $elemMatch: { pickupCode, status: 'pending' },
-            }),
-        },
+        { redemptions: { $elemMatch: { pickupCode, status: 'pending' } } },
         { $set: { 'redemptions.$.status': 'claimed', 'redemptions.$.claimedAt': new Date() } },
         { new: true }
     );
     if (!reward) {
         const existing = await Reward.findOne({ 'redemptions.pickupCode': pickupCode });
-        throw new Error(existing ? 'This reward has already been collected.' : 'Pickup code not found. Check the code with the resident.');
+        throw new Error(existing ? 'This reward has already been claimed.' : 'Pickup code not found. Check the code with the resident.');
     }
     const redemption = reward.redemptions.find((entry) => entry.pickupCode === pickupCode);
     const resident = await User.findById(redemption.user).select('name email');
     return toRedemptionSummary(reward, redemption, resident);
 };
  
-export { createReward, getAllRewards, updateReward, deleteReward, getRewardImage, setRewardImage, removeRewardImage, redeemReward, listMyRedemptions, lookupRedemptionByCode, claimRedemptionByCode };
+export { createReward, getAllRewards, updateReward, getRewardImage, setRewardImage, removeRewardImage, redeemReward, listMyRedemptions, lookupRedemptionByCode, claimRedemptionByCode };

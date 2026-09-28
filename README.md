@@ -25,7 +25,6 @@ The station uses a camera running the existing YOLO model for explicit waste cla
 
 - Separate first name, middle initial, and last name registration fields
 - Password confirmation, strength feedback, secure hashing, and JWT authentication
-- Email-delivered, single-use password reset codes with a 15-minute expiry
 - Session-based QR and manual-code claims
 - Sequential plastic bottle, tin can, and paper disposals with item-count quest targets
 - Daily and weekly quests with scheduling and expiration handling
@@ -90,17 +89,7 @@ Create `Backend/.env`:
 MONGO_URI=mongodb://127.0.0.1:27017/trashquest
 JWT_SECRET=replace-this-with-a-random-secret-of-at-least-32-characters
 PORT=5001
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=465
-SMTP_SECURE=true
-SMTP_USER=your-email@gmail.com
-SMTP_PASS=your-email-app-password
-SMTP_FROM="TrashQuest <your-email@gmail.com>"
 ```
-
-For Gmail, enable two-step verification and use a Google App Password for
-`SMTP_PASS`; do not use the account's normal password. Other email providers
-can be used by replacing the SMTP host, port, secure setting, and credentials.
 
 Start the API:
 

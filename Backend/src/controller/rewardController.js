@@ -2,7 +2,6 @@ import {
     createReward,
     getAllRewards,
     updateReward,
-    deleteReward,
     getRewardImage,
     setRewardImage,
     removeRewardImage,
@@ -35,15 +34,6 @@ const editReward = async (req, res) => {
     try {
         const reward = await updateReward(req.params.id, req.body);
         res.status(200).json({ success: true, message: 'Reward updated successfully', data: reward });
-    } catch (error) {
-        res.status(400).json({ success: false, message: error.message });
-    }
-};
-
-const removeReward = async (req, res) => {
-    try {
-        const reward = await deleteReward(req.params.id);
-        res.status(200).json({ success: true, message: 'Reward deleted successfully', data: reward });
     } catch (error) {
         res.status(400).json({ success: false, message: error.message });
     }
@@ -119,4 +109,4 @@ const claimRedemption = async (req, res) => {
     }
 };
 
-export { addReward, listRewards, editReward, removeReward, serveRewardImage, uploadRewardImage, deleteRewardImage, redeem, myRedemptions, findRedemption, claimRedemption };
+export { addReward, listRewards, editReward, serveRewardImage, uploadRewardImage, deleteRewardImage, redeem, myRedemptions, findRedemption, claimRedemption };
