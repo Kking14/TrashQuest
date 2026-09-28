@@ -131,6 +131,37 @@ class PlatformClearTracker:
         return is_clear, should_signal
 
 
+class MetalCountTracker:
+    """Require several fresh, identical camera counts before crediting cans."""
+
+    def __init__(self, max_items=5):
+        self.max_items = max_items
+        self.samples = deque(maxlen=40)
+
+    def reset(self):
+        self.samples.clear()
+
+    def observe(self, boxes, now):
+        boxes = list(boxes)
+        ambiguous = len(boxes) > self.max_items
+        for index, first in enumerate(boxes):
+            for second in boxes[index + 1:]:
+                if MetalObjectMatcher.overlap(first, second) > 0.35:
+                    ambiguous = True
+        self.samples.append((now, len(boxes), ambiguous))
+
+    def stable_count(self, now, since, window=1.5):
+        samples = [sample for sample in self.samples if max(since, now - window) <= sample[0] <= now]
+        if (len(samples) < 3 or samples[-1][0] < now - 0.75
+                or samples[-1][0] - samples[0][0] < 0.5):
+            return None
+        counts = {count for _, count, ambiguous in samples if not ambiguous}
+        if any(ambiguous for _, _, ambiguous in samples) or len(counts) != 1:
+            return None
+        count = counts.pop()
+        return count if 1 <= count <= self.max_items else None
+
+
 class MetalObjectMatcher:
     """Associate at most one visible object with the metal sensor, then track it.
 

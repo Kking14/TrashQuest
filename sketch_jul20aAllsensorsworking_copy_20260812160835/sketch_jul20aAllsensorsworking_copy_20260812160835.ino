@@ -30,7 +30,7 @@ const unsigned long homeHoldMs = 750;  // allow the physical servo to settle bef
 const bool metalDirection = HIGH;
 const bool plasticDirection = LOW;
 
-const unsigned long aiWaitTimeoutMs = 8000;
+const unsigned long aiWaitTimeoutMs = 15000; // includes the five-second tin-can collection countdown
 const unsigned long confirmationTimeoutMs = 120000;
 const unsigned long motorTimeoutMs = 30000;
 const unsigned long platformEmptyTimeoutMs = 120000;

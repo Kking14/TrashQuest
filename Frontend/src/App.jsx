@@ -647,6 +647,7 @@ function BinDisplayDashboard({ onExit }) {
   const [binFull, setBinFull] = useState(false);
   const [platformCleared, setPlatformCleared] = useState(false);
   const [cameraStatus, setCameraStatus] = useState({ fps: null, detections: [], workflowState: 'IDLE' });
+  const [metalCountdown, setMetalCountdown] = useState(null);
   const [cameraVisible, setCameraVisible] = useState(true);
   const [modelChoices, setModelChoices] = useState([]);
   const [selectedModel, setSelectedModel] = useState('current');
@@ -731,6 +732,8 @@ function BinDisplayDashboard({ onExit }) {
         if (!stopped) {
           setGatewayOnline(Boolean(status.online && status.serial && status.camera));
           setGatewayScanning(Boolean(status.scanning));
+          setMetalCountdown(status.metalCountdownEndsAt
+            ? Math.max(0, Math.ceil(status.metalCountdownEndsAt - Date.now() / 1000)) : null);
           setGatewaySimulation(Boolean(status.simulation));
           setBinFull(Boolean(status.binFull));
           setGatewayPlatformClear(Boolean(status.platformClear));
@@ -750,7 +753,7 @@ function BinDisplayDashboard({ onExit }) {
             workflowState: status.workflowState || 'IDLE',
           });
           if (status.scanning && displayState === 'ready') setDisplayState('detecting');
-          if (!status.scanning && displayState === 'detecting' && !detectedItem) setDisplayState('ready');
+          if (!status.scanning && !status.metalCountdownEndsAt && displayState === 'detecting' && !detectedItem) setDisplayState('ready');
           if (status.manualRecoveryRequired) {
             setNotice(status.lastError || 'Sorting locked. Please ask the operator to check the mechanism.');
             setDisplayState('waiting-empty');
@@ -770,6 +773,10 @@ function BinDisplayDashboard({ onExit }) {
           gatewaySequence.current = Math.max(gatewaySequence.current, event.sequence || 0);
           if (event.type === 'item_detected') {
             handleWasteDetected(event.wasteType, event.itemCount, event);
+          } else if (event.type === 'metal_countdown') {
+            setMetalCountdown(Math.max(0, Math.ceil(event.endsAt - Date.now() / 1000)));
+            setNotice(event.message);
+            setDisplayState('detecting');
           } else if (event.type === 'item_sorted') {
             handleWasteSorted(event);
           } else if (event.type === 'sorting_successful') {
@@ -1180,16 +1187,16 @@ function BinDisplayDashboard({ onExit }) {
             </div>
             <p className="kiosk-kicker">Smart waste station</p>
             <h1>{binFull ? 'Bin temporarily unavailable' : 'Place paper or plastic bottles on the platform'}</h1>
-            <p>{binFull ? 'This bin is full and needs collection.' : 'Place one waste type at a time. The AI counts visible papers or bottles and sorts the batch automatically. Tin cans go one at a time. Paper: 5 points · Plastic: 10 points · Tin can: 15 points.'}</p>
+            <p>{binFull ? 'This bin is full and needs collection.' : `Place one waste type at a time. The AI counts visible papers or bottles and sorts the batch automatically. ${['yolo26n-tincan-ncnn', 'yolo26s-tincan-onnx'].includes(activeModel) ? 'Tin cans can be grouped when the camera confirms a stable count.' : 'Tin cans go one at a time.'} Paper: 5 points · Plastic: 10 points · Tin can: 15 points.`}</p>
           </div>
         )}
 
         {displayState === 'detecting' && (
           <div className="kiosk-message detecting-message">
             <div className="scanner-orb"><span>{detectedItem?.icon}</span><i /></div>
-            <p className="kiosk-kicker">AI scanning</p>
-            <h1>Analyzing the platform…</h1>
-            <p>Keep the item still while its waste type is identified.</p>
+            <p className="kiosk-kicker">{metalCountdown !== null ? 'Metal detected' : 'AI scanning'}</p>
+            <h1>{metalCountdown !== null ? `Add other tin cans now · ${metalCountdown}s` : 'Analyzing the platform…'}</h1>
+            <p>{metalCountdown !== null ? 'Keep the cans separate and still. The metal sensor has confirmed the batch; the motor will wait until the camera finishes counting.' : 'Keep the item still while its waste type is identified.'}</p>
             <div className="scan-progress"><i /></div>
           </div>
         )}

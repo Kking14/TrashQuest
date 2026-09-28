@@ -25,7 +25,7 @@ except ImportError:  # Pure unit tests do not need the optional station packages
     def load_dotenv(*_args, **_kwargs):
         return False
 
-from station_detection import BatchCoordinator, Detection, MetalObjectMatcher, PlatformClearTracker, StableBatchDetector
+from station_detection import BatchCoordinator, Detection, MetalCountTracker, MetalObjectMatcher, PlatformClearTracker, StableBatchDetector
 
 
 ROOT = Path(__file__).resolve().parent
@@ -56,7 +56,11 @@ MODEL_OPTIONS = {
     "yolo26n-pt": ("YOLO26n · PyTorch", ROOT / "models/yolo26n/best.pt"),
     "yolo26n-onnx": ("YOLO26n · ONNX", ROOT / "models/yolo26n/best.onnx"),
     "yolo26n-ncnn": ("YOLO26n · NCNN", ROOT / "models/yolo26n/best_ncnn_model"),
+    "yolo26n-tincan-ncnn": ("YOLO26n tin cans · NCNN (Pi)", ROOT / "models/yolo26n/yolo26n_tincan_best_ncnn_model"),
+    "yolo26s-tincan-onnx": ("YOLO26s tin cans · ONNX (laptop)", ROOT / "models/yolo26s/yolo26s_tincan_best.onnx"),
 }
+METAL_COUNT_MODELS = {"yolo26n-tincan-ncnn", "yolo26s-tincan-onnx"}
+METAL_COLLECTION_SECONDS = 5.0
 SERIAL_PORT = os.getenv("TQ_SERIAL_PORT", "COM3")
 BAUD_RATE = int(os.getenv("TQ_BAUD_RATE", "115200"))
 CAMERA_INDEX = int(os.getenv("TQ_CAMERA_INDEX", "0"))
@@ -114,6 +118,7 @@ MIXED_WASTE_MESSAGE = "Two different waste types detected. Please put only one w
 sensor_interlock_lock = threading.RLock()
 sensor_clear_since = None
 metal_matcher = MetalObjectMatcher(INDUCTIVE_ROI)
+metal_count_tracker = MetalCountTracker(max_items=5)
 
 
 def update_sensor_interlock(*, metal=None, ai_visible=None):
@@ -126,6 +131,7 @@ def update_sensor_interlock(*, metal=None, ai_visible=None):
             if metal and not station_status.get("inductiveActive", False):
                 station_status["metalSignalAt"] = time.monotonic()
                 station_status["metalCheckReady"] = False
+                station_status["metalMatched"] = False
                 # The old AI box may be the can itself. Re-evaluate a fresh
                 # frame against the sensor position before calling it mixed.
                 station_status["aiWasteVisible"] = False
@@ -141,12 +147,12 @@ def update_sensor_interlock(*, metal=None, ai_visible=None):
         ai_sort_active = (station_status.get("activeSource") == "ai_camera"
                           and station_status.get("workflowState") in {"PREPARING", "SORTING"})
         metal_sort_active = (station_status.get("activeSource") == "inductive_sensor"
-                            and station_status.get("workflowState") in {"PREPARING", "SORTING"})
+                            and station_status.get("workflowState") in {"COLLECTING_METAL", "PREPARING", "SORTING"})
         if (metal_active and (camera_active or ai_sort_active)) or (camera_active and metal_sort_active):
             if not station_status.get("sensorMixedBlocked"):
                 publish({"type": "mixed_waste_rejected", "message": MIXED_WASTE_MESSAGE})
             station_status["sensorMixedBlocked"] = True
-        if metal_active or camera_active:
+        if metal_active or camera_active or metal_sort_active:
             sensor_clear_since = None
         elif station_status.get("sensorMixedBlocked"):
             if sensor_clear_since is None:
@@ -161,7 +167,7 @@ def mixed_waste_blocked():
     return station_status.get("mixedWasteBlocked", False) or station_status.get("sensorMixedBlocked", False)
 
 
-def associate_metal(detections, captured_at):
+def associate_metal(detections, captured_at, metal_boxes=()):
     with sensor_interlock_lock:
         if (station_status.get("activeSource") == "inductive_sensor"
                 and station_status.get("workflowState") == "SORTING"):
@@ -173,12 +179,27 @@ def associate_metal(detections, captured_at):
         metal_active = station_status.get("inductiveActive", False)
         transaction_active = (station_status.get("activeSource") == "inductive_sensor"
                               and station_status.get("workflowState") in
-                              {"PREPARING", "SORTING", "WAITING_FOR_PLATFORM_EMPTY", "ERROR_RECOVERY"})
+                              {"COLLECTING_METAL", "PREPARING", "SORTING", "WAITING_FOR_PLATFORM_EMPTY", "ERROR_RECOVERY"})
         visible = [item for item in detections if item.confidence >= max(0.05, CONFIDENCE * 0.75)
                    and PLATFORM_ROI[0] <= (item.box[0] + item.box[2]) / 2 <= PLATFORM_ROI[2]
                    and PLATFORM_ROI[1] <= (item.box[1] + item.box[3]) / 2 <= PLATFORM_ROI[3]]
         if metal_active and captured_at <= station_status.get("metalSignalAt", 0):
             return [], None, True, True
+        if active_model_key in METAL_COUNT_MODELS and (metal_active or transaction_active):
+            # The inductive trigger confirms the metal batch once. The camera
+            # may count cans anywhere on the platform afterward. A separate
+            # paper/plastic box is mixed waste; only a near-identical duplicate
+            # box on top of a metal box may be ignored.
+            metal_boxes = list(metal_boxes)
+            sx = (INDUCTIVE_ROI[0] + INDUCTIVE_ROI[2]) / 2
+            sy = (INDUCTIVE_ROI[1] + INDUCTIVE_ROI[3]) / 2
+            station_status["metalMatched"] = any(
+                box[0] <= sx <= box[2] and box[1] <= sy <= box[3] for box in metal_boxes)
+            remaining = [item for item in visible if not any(
+                MetalObjectMatcher.overlap(item.box, box) >= 0.75 for box in metal_boxes)]
+            update_sensor_interlock(ai_visible=bool(remaining))
+            station_status["metalCheckReady"] = True
+            return remaining, None, False, True
         remaining, matched, pending = metal_matcher.update(
             visible, metal_active=metal_active, transaction_active=transaction_active, now=captured_at)
         # Additional boxes always count, even while the matched box stabilizes.
@@ -224,6 +245,7 @@ camera_stop = threading.Event()
 preview_annotations = (0.0, [])
 coordinator = BatchCoordinator()
 ignored_detection_ids = deque(maxlen=200)
+count_rejection_ids = deque(maxlen=200)
 
 
 def publish(event: dict) -> None:
@@ -613,11 +635,14 @@ def select_model(key: str, loader=None) -> str:
             names = candidate.names.values() if isinstance(candidate.names, dict) else candidate.names
             if not {"Paper", "Plastic"}.issubset({normalize_class(str(name)) for name in names}):
                 raise ValueError(f"{label} does not contain both paper and plastic classes")
+            if key in METAL_COUNT_MODELS and not any(str(name).strip().lower() == "metal" for name in names):
+                raise ValueError(f"{label} does not contain a metal class for can counting")
             if (station_status.get("workflowState") != "IDLE"
                     or coordinator.active_detection_id or not station_status.get("platformClear")):
                 raise RuntimeError("The platform changed while loading the model. Try again when empty.")
             active_model = candidate
             active_model_key = key
+            metal_count_tracker.reset()
             model_generation += 1
             station_status["activeModel"] = key
             station_status["detections"] = []
@@ -641,6 +666,45 @@ def batch_from_inductive(message: dict) -> dict:
         "confidence": 1.0,
         "source": "inductive_sensor",
     }
+
+
+def collect_metal_count(detection_id: str) -> int | None:
+    """Keep the motors idle while the camera counts visible metal objects."""
+    started = time.monotonic()
+    ends_at = time.time() + METAL_COLLECTION_SECONDS
+    with sensor_interlock_lock:
+        metal_count_tracker.reset()
+        station_status["metalCountdownEndsAt"] = ends_at
+        station_status["metalCountCandidate"] = 0
+        station_status["metalCountFailure"] = None
+    set_workflow("COLLECTING_METAL")
+    publish({"type": "metal_countdown", "detectionId": detection_id, "endsAt": ends_at,
+             "message": "Tin can detected. Add other tin cans now, then keep them still."})
+    try:
+        while time.monotonic() - started < METAL_COLLECTION_SECONDS:
+            if mixed_waste_blocked():
+                station_status["metalCountFailure"] = MIXED_WASTE_MESSAGE
+                return None
+            if station_status.get("manualRecoveryRequired"):
+                station_status["metalCountFailure"] = station_status.get("lastError") or "Station needs recovery before sorting."
+                return None
+            if station_status.get("binFull"):
+                station_status["metalCountFailure"] = "Bin is full and needs collection."
+                return None
+            if not station_status.get("acceptingItems", True):
+                station_status["metalCountFailure"] = "Station is not ready to accept another item."
+                return None
+            time.sleep(0.05)
+        with sensor_interlock_lock:
+            if mixed_waste_blocked():
+                station_status["metalCountFailure"] = MIXED_WASTE_MESSAGE
+                return None
+            count = metal_count_tracker.stable_count(time.monotonic(), started)
+            if count is None:
+                station_status["metalCountFailure"] = "The camera could not confirm a stable tin-can count. Separate the cans, keep them still, then try again."
+            return count
+    finally:
+        station_status["metalCountdownEndsAt"] = None
 
 
 def offer_latest_frame(frame, captured_at):
@@ -723,6 +787,7 @@ def vision_loop(model) -> None:
         accepted_detections = []
         display_detections = []
         annotations = []
+        metal_boxes = []
         platform_has_object = False
         for model_box in result.boxes:
             class_id = int(model_box.cls[0])
@@ -734,12 +799,21 @@ def vision_loop(model) -> None:
             if waste_type:
                 accepted_detections.append(Detection(waste_type, confidence, normalized_box))
             in_roi = PLATFORM_ROI[0] <= (x1 + x2) / (2 * width) <= PLATFORM_ROI[2] and PLATFORM_ROI[1] <= (y1 + y2) / (2 * height) <= PLATFORM_ROI[3]
+            if (active_model_key in METAL_COUNT_MODELS and class_name.strip().lower() == "metal"
+                    and in_roi and confidence >= CONFIDENCE):
+                metal_boxes.append(normalized_box)
+                platform_has_object = True
             if waste_type and in_roi and confidence >= CONFIDENCE:
                 platform_has_object = True
             display_detections.append({"className": class_name, "wasteType": waste_type, "confidence": confidence, "inPlatformRoi": in_roi, "box": normalized_box})
             color = (66, 214, 137) if waste_type and in_roi else (120, 120, 120)
             annotations.append((class_name, confidence, normalized_box, color))
-        remaining, matched, pending, metal_context = associate_metal(accepted_detections, captured_at)
+        if active_model_key in METAL_COUNT_MODELS:
+            with sensor_interlock_lock:
+                if station_status.get("inductiveActive") or station_status.get("workflowState") in {"COLLECTING_METAL", "PREPARING"}:
+                    metal_count_tracker.observe(metal_boxes, captured_at)
+                    station_status["metalCountCandidate"] = len(metal_boxes)
+        remaining, matched, pending, metal_context = associate_metal(accepted_detections, captured_at, metal_boxes)
         if matched is not None:
             annotations = [("Metal (inductive)" if bounds == matched.box else label, conf, bounds,
                             (0, 190, 255) if bounds == matched.box else color)
@@ -816,7 +890,20 @@ def handle_batch(device, batch: dict) -> None:
         publish({"type": "busy", "detectionId": detection_id, "message": "Another batch is active"})
         return
     station_status["activeSource"] = batch.get("source", "ai_camera")
-    item_count = 1 if batch["wasteType"] == "Tin Can" else max(1, min(100, int(batch.get("itemCount") or 1)))
+    if batch.get("source") == "inductive_sensor" and active_model_key in METAL_COUNT_MODELS and not SIMULATION_MODE:
+        count = collect_metal_count(detection_id)
+        if count is None:
+            ignored_detection_ids.append(detection_id)
+            count_rejection_ids.append(detection_id)
+            send(device, {"command": "recover", "detectionId": detection_id})
+            coordinator.clear()
+            station_status["activeSource"] = None
+            set_workflow("IDLE")
+            publish({"type": "rejected", "detectionId": detection_id,
+                     "message": station_status.get("metalCountFailure") or "Could not confirm a stable tin-can count. Separate the cans, keep one over the metal sensor, then try again."})
+            return
+        batch["itemCount"] = count
+    item_count = max(1, min(100, int(batch.get("itemCount") or 1)))
     batch.update(itemCount=item_count, confidence=round(float(batch.get("confidence") or 0), 3))
     set_workflow("PREPARING")
     send(device, {"command": "prepare", "detectionId": detection_id, "wasteType": batch["wasteType"], "itemCount": item_count, "source": batch.get("source", "ai_camera")})
@@ -838,6 +925,12 @@ def handle_batch(device, batch: dict) -> None:
         if station_status.get("lastInferenceCapturedAt", 0) <= capture_after or not station_status.get("metalCheckReady"):
             prepared = None
             prepare_error = "Camera check timed out. Remove the items and try again; no item was counted."
+        elif active_model_key in METAL_COUNT_MODELS:
+            with sensor_interlock_lock:
+                confirmed_count = metal_count_tracker.stable_count(time.monotonic(), capture_after - 1.5)
+            if confirmed_count != item_count:
+                prepared = None
+                prepare_error = "Tin-can count changed after the countdown. Separate the cans and try again; no item was counted."
     if mixed_waste_blocked():
         send(device, {"command": "recover", "detectionId": detection_id})
         coordinator.clear()
@@ -916,7 +1009,7 @@ def process_workflow_event(device, message: dict) -> None:
     event_name = message.get("event")
     detection_id = message.get("detectionId")
     if detection_id in ignored_detection_ids:
-        if event_name in {"timeout", "error"}:
+        if event_name in {"timeout", "error"} and detection_id not in count_rejection_ids:
             publish({"type": "detection_ignored", "detectionId": detection_id,
                      "message": "Remove the extra item, then choose Not done before placing more waste."})
         return
