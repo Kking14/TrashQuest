@@ -736,6 +736,7 @@ function BinDisplayDashboard({ onExit }) {
   const [gatewayPlatformClear, setGatewayPlatformClear] = useState(false);
   const detectionTimer = useRef(null);
   const gatewaySequence = useRef(null);
+  const qrActiveRef = useRef(false);
 
   useEffect(() => {
     if (items.length > 0) sessionStorage.setItem(pendingClaimsStorageKey, JSON.stringify(items));
@@ -833,7 +834,13 @@ function BinDisplayDashboard({ onExit }) {
           });
           if (status.scanning && displayState === 'ready') setDisplayState('detecting');
           if (!status.scanning && !status.metalCountdownEndsAt && displayState === 'detecting' && !detectedItem) setDisplayState('ready');
-          if (status.manualRecoveryRequired) {
+          if (status.handNotice && !qrActiveRef.current) setNotice(status.handNotice);
+          if (status.handCancellation && !qrActiveRef.current) {
+            setDetectedItem(null);
+            setMetalCountdown(null);
+            setDisplayState('waiting-empty');
+          }
+          if (status.manualRecoveryRequired && !qrActiveRef.current) {
             setNotice(status.lastError || 'Sorting locked. Please ask the operator to check the mechanism.');
             setDisplayState('waiting-empty');
           }
@@ -850,7 +857,13 @@ function BinDisplayDashboard({ onExit }) {
         }
         for (const event of payload.events || []) {
           gatewaySequence.current = Math.max(gatewaySequence.current, event.sequence || 0);
-          if (event.type === 'item_detected') {
+          if (qrActiveRef.current) continue;
+          if (event.type === 'hand_reward_cancelled') {
+            setDetectedItem(null);
+            setMetalCountdown(null);
+            setNotice(event.message);
+            setDisplayState('waiting-empty');
+          } else if (event.type === 'item_detected') {
             handleWasteDetected(event.wasteType, event.itemCount, event);
           } else if (event.type === 'metal_countdown') {
             setMetalCountdown(Math.max(0, Math.ceil(event.endsAt - Date.now() / 1000)));
@@ -996,9 +1009,11 @@ function BinDisplayDashboard({ onExit }) {
     }
     setDeviceKey(normalizedDeviceKey);
     if (claim) {
+      qrActiveRef.current = true;
       setDisplayState('qr');
       setNotice('Recovered your session QR. Ask the resident to scan it.');
     } else if (items.length > 0) {
+      qrActiveRef.current = false;
       setDisplayState('waiting-empty');
       setNotice('Recovered sorted disposals. Choose Done to show the QR for available claims.');
     } else {
@@ -1036,6 +1051,7 @@ function BinDisplayDashboard({ onExit }) {
   }
 
   function clearSession() {
+    qrActiveRef.current = false;
     fetch('http://127.0.0.1:8765/continue', { method: 'POST' }).catch(() => {});
     if (gatewaySimulation) {
       fetch('http://127.0.0.1:8765/simulate', {
@@ -1062,6 +1078,7 @@ function BinDisplayDashboard({ onExit }) {
       return;
     }
 
+    qrActiveRef.current = true;
     setBusy(true);
     setDisplayState('qr');
     setNotice('');
@@ -1305,6 +1322,7 @@ function BinDisplayDashboard({ onExit }) {
             <p className="kiosk-kicker">{displayState === 'sorting' ? 'Sorting in progress' : 'Sorting successful'}</p>
             <h1>{displayState === 'sorting' ? 'Please wait…' : 'Creating your claim…'}</h1>
             <p>{displayState === 'sorting' ? 'The station is sorting this batch automatically.' : 'Points are recorded only after the ESP32 confirms success.'}</p>
+            {displayState === 'sorting' && <p className="kiosk-hand-warning" role="status">Please keep your hands out of the camera view during disposal.</p>}
           </div>
         )}
 
@@ -1327,7 +1345,7 @@ function BinDisplayDashboard({ onExit }) {
             {notice && !claim && (
               <div className="qr-error-actions">
                 <div className="kiosk-error">{notice}</div>
-                <button type="button" className="kiosk-secondary" onClick={() => setDisplayState('recognized')}>
+                <button type="button" className="kiosk-secondary" onClick={() => { qrActiveRef.current = false; setDisplayState('recognized'); }}>
                   Go back and retry
                 </button>
               </div>
@@ -1364,6 +1382,9 @@ function BinDisplayDashboard({ onExit }) {
         <aside className="session-pill">
           <span>{totalItems} {totalItems === 1 ? 'item' : 'items'}</span>
           <strong>{estimatedTotalPoints} pts</strong>
+          <button type="button" className="session-qr-button" onClick={() => finishSession()} disabled={busy}>
+            {busy ? 'Creating QR…' : 'Show QR for completed items'}
+          </button>
         </aside>
       )}
 
