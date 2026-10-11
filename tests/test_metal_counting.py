@@ -17,7 +17,7 @@ class MetalCountTrackerTests(unittest.TestCase):
         for at in (1.0, 1.3, 1.6):
             self.tracker.observe([self.can_a, self.can_b], at)
         self.assertEqual(self.tracker.stable_count(1.7, since=1.0), 2)
-        self.assertIsNone(self.tracker.stable_count(2.5, since=1.0))
+        self.assertIsNone(self.tracker.stable_count(2.8, since=1.0))
 
     def test_changing_or_overlapping_boxes_are_not_counted(self):
         self.tracker.observe([self.can_a], 1.0)

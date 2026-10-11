@@ -6,6 +6,8 @@ after stable per-box classification inside the configured platform ROI.
 
 from __future__ import annotations
 
+from station_hands import HandMonitor
+
 import argparse
 import json
 import os
@@ -60,6 +62,7 @@ MODEL_OPTIONS = {
     "yolo26s-tincan-onnx": ("YOLO26s tin cans · ONNX (laptop)", ROOT / "models/yolo26s/yolo26s_tincan_best.onnx"),
 }
 METAL_COUNT_MODELS = {"yolo26n-tincan-ncnn", "yolo26s-tincan-onnx"}
+METAL_COUNT_CONFIDENCE = float(os.getenv("TQ_METAL_COUNT_CONFIDENCE", "0.55"))
 METAL_COLLECTION_SECONDS = 5.0
 SERIAL_PORT = os.getenv("TQ_SERIAL_PORT", "COM3")
 BAUD_RATE = int(os.getenv("TQ_BAUD_RATE", "115200"))
@@ -212,7 +215,7 @@ def associate_metal(detections, captured_at, metal_boxes=()):
 def update_camera_stability(detector, detections, captured_at):
     """Keep the accepted camera batch fixed while the mechanism is moving."""
     with sensor_interlock_lock:
-        if station_status.get("workflowState") == "SORTING":
+        if station_status.get("workflowState") in {"SORTING", "HAND_RETURNING"}:
             # Motion can make one paper item briefly look like plastic (or
             # split it into two boxes). Validate mixed waste before motion.
             return None
@@ -241,6 +244,41 @@ frame_lock = threading.Condition()
 latest_jpeg: bytes | None = None
 vision_sequence = 0
 camera_frames = queue.Queue(maxsize=1)
+hand_monitor = None
+hand_device = None
+hand_lock = threading.RLock()
+serial_write_lock = threading.RLock()
+hand_cancelled_ids = deque(maxlen=200)
+
+
+def hands_clear():
+    return hand_monitor is None or hand_monitor.clear()
+
+
+def hand_watchdog():
+    while not camera_stop.wait(0.05):
+        monitor = hand_monitor
+        if monitor is None:
+            continue
+        with monitor.lock:
+            fresh = monitor.fresh()
+            present = monitor.present
+        station_status.update(handDetected=fresh and present, handDetectorReady=fresh)
+        if station_status.get("workflowState") == "SORTING" and fresh and present:
+            forfeit_hand_reward("Hand detected during sorting. The motor will finish; no points for this disposal.")
+
+
+def forfeit_hand_reward(message):
+    with hand_lock:
+        detection_id = coordinator.active_detection_id
+        if (station_status.get("workflowState") != "SORTING" or not detection_id
+                or detection_id in hand_cancelled_ids):
+            return
+        hand_cancelled_ids.append(detection_id)
+        station_status.update(handCancellation=True, handNotice=message)
+        publish({"type": "hand_reward_cancelled", "detectionId": detection_id, "message": message})
+
+
 camera_stop = threading.Event()
 preview_annotations = (0.0, [])
 coordinator = BatchCoordinator()
@@ -282,7 +320,7 @@ def handle_controller_recovery(message: dict) -> bool:
     if message.get("event") == "ready" and station_status.get("manualRecoveryRequired"):
         coordinator.clear()
         station_status.update(manualRecoveryRequired=False, acceptingItems=True,
-                              activeSource=None, lastError=None)
+                              activeSource=None, lastError=None, handCancellation=False, handNotice=None)
         set_workflow("IDLE")
         publish({"type": "recovery_cleared", "message": "Station restarted. Clear the platform before placing the next item."})
     return False
@@ -570,8 +608,9 @@ class SimulationSerial:
 
 
 def send(device, message: dict) -> None:
-    device.write((json.dumps(message, separators=(",", ":")) + "\n").encode())
-    device.flush()
+    with serial_write_lock:
+        device.write((json.dumps(message, separators=(",", ":")) + "\n").encode())
+        device.flush()
     print("ESP32 <-", message)
 
 
@@ -729,6 +768,8 @@ def camera_preview_loop(camera) -> None:
             continue
         captured_at = time.monotonic()
         offer_latest_frame(frame.copy(), captured_at)
+        if hand_monitor is not None:
+            hand_monitor.offer(frame.copy(), captured_at)
         height, width = frame.shape[:2]
         annotated_at, annotations = preview_annotations
         # Boxes update at inference speed; expire them if inference stops.
@@ -737,6 +778,12 @@ def camera_preview_loop(camera) -> None:
                 x1, y1, x2, y2 = bounds
                 cv2.rectangle(frame, (int(x1 * width), int(y1 * height)), (int(x2 * width), int(y2 * height)), color, 2)
                 cv2.putText(frame, f"{label} {confidence:.0%}", (int(x1 * width), max(18, int(y1 * height) - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+        if hand_monitor is not None:
+            with hand_monitor.lock:
+                hand_boxes = list(hand_monitor.boxes) if hand_monitor.fresh() else []
+            for x1, y1, x2, y2 in hand_boxes:
+                cv2.rectangle(frame, (int(x1 * width), int(y1 * height)), (int(x2 * width), int(y2 * height)), (0, 0, 255), 2)
+                cv2.putText(frame, "HAND", (int(x1 * width), max(18, int(y1 * height) - 7)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
         rx1, ry1, rx2, ry2 = PLATFORM_ROI
         cv2.rectangle(frame, (int(rx1 * width), int(ry1 * height)), (int(rx2 * width), int(ry2 * height)), (40, 220, 240), 2)
         cv2.putText(frame, "PLATFORM ROI", (int(rx1 * width), max(20, int(ry1 * height) - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40, 220, 240), 2)
@@ -800,7 +847,7 @@ def vision_loop(model) -> None:
                 accepted_detections.append(Detection(waste_type, confidence, normalized_box))
             in_roi = PLATFORM_ROI[0] <= (x1 + x2) / (2 * width) <= PLATFORM_ROI[2] and PLATFORM_ROI[1] <= (y1 + y2) / (2 * height) <= PLATFORM_ROI[3]
             if (active_model_key in METAL_COUNT_MODELS and class_name.strip().lower() == "metal"
-                    and in_roi and confidence >= CONFIDENCE):
+                    and in_roi and confidence >= METAL_COUNT_CONFIDENCE):
                 metal_boxes.append(normalized_box)
                 platform_has_object = True
             if waste_type and in_roi and confidence >= CONFIDENCE:
@@ -840,7 +887,7 @@ def vision_loop(model) -> None:
 
         active_detection_id = coordinator.active_detection_id
         platform_clear, should_signal_empty = clear_tracker.update(
-            has_object=platform_has_object,
+            has_object=platform_has_object or not hands_clear(),
             now=monotonic_now,
             active_detection_id=active_detection_id,
             waiting_for_empty=(
@@ -863,6 +910,8 @@ def vision_loop(model) -> None:
 
 
 def handle_batch(device, batch: dict) -> None:
+    if station_status.get("handCancellation"):
+        return
     detection_id = str(batch["detectionId"])
     if batch.get("source") == "ai_camera" and station_status.get("inductiveActive"):
         return  # A queued pre-metal camera classification cannot win the reservation.
@@ -953,6 +1002,20 @@ def handle_batch(device, batch: dict) -> None:
     if station_status.get("manualRecoveryRequired"):
         coordinator.clear()
         return
+    if hand_monitor is not None:
+        deadline = time.monotonic() + 8
+        while not hands_clear() and time.monotonic() < deadline:
+            station_status["handNotice"] = "Remove your hand from the platform. Waiting for a clear camera check."
+            time.sleep(0.05)
+        if not hands_clear():
+            send(device, {"command": "recover", "detectionId": detection_id})
+            coordinator.clear()
+            message = "Hand check unavailable or hand still present. Remove the waste and retry."
+            station_status["handNotice"] = message
+            set_workflow("IDLE")
+            publish({"type": "rejected", "message": message})
+            return
+        station_status["handNotice"] = None
     with sensor_interlock_lock:
         # The camera's final mixed-waste check and motion commit must be
         # atomic. Once committed, changing AI labels cannot cancel the sort.
@@ -964,12 +1027,19 @@ def handle_batch(device, batch: dict) -> None:
             return
         if batch.get("source") == "inductive_sensor":
             station_status["aiWasteVisible"] = False
-        set_workflow("SORTING")
-    send(device, {
-        "command": "sort", "detectionId": detection_id, "wasteType": batch["wasteType"],
-        "itemCount": item_count, "confidence": batch["confidence"],
-        "source": batch.get("source", "ai_camera"),
-    })
+        with hand_lock:
+            if not hands_clear():
+                send(device, {"command": "recover", "detectionId": detection_id})
+                coordinator.clear()
+                set_workflow("IDLE")
+                publish({"type": "rejected", "message": "Remove your hand and retry; sorting did not start."})
+                return
+            set_workflow("SORTING")
+            send(device, {
+                "command": "sort", "detectionId": detection_id, "wasteType": batch["wasteType"],
+                "itemCount": item_count, "confidence": batch["confidence"],
+                "source": batch.get("source", "ai_camera"),
+            })
     result = wait_for_event(detection_id, "sorted", SORT_TIMEOUT)
     if station_status.get("manualRecoveryRequired"):
         coordinator.clear()
@@ -988,10 +1058,18 @@ def handle_batch(device, batch: dict) -> None:
         set_workflow("ERROR_RECOVERY", message)
         set_workflow("IDLE")
         return
-    station_status["acceptingItems"] = False
-    publish({"type": "sorting_successful", **batch})
-    backend_jobs.put({"kind": "claim", "batch": dict(batch)})
-    set_workflow("WAITING_FOR_PLATFORM_EMPTY")
+    with hand_lock:
+        if hand_monitor is not None and hand_monitor.fresh() and hand_monitor.present:
+            forfeit_hand_reward("Hand detected during sorting. The motor finished; no points for this disposal.")
+        forfeited = detection_id in hand_cancelled_ids
+        station_status["acceptingItems"] = False
+        set_workflow("WAITING_FOR_PLATFORM_EMPTY")
+        if forfeited:
+            publish({"type": "hand_reward_cancelled", "detectionId": detection_id,
+                     "message": "Sorting finished. Remove the waste and hand; no points were awarded."})
+        else:
+            publish({"type": "sorting_successful", **batch})
+            backend_jobs.put({"kind": "claim", "batch": dict(batch)})
     if SIMULATION_MODE:
         threading.Timer(0.75, lambda: workflow_events.put({"event": "platform_empty", "detectionId": detection_id})).start()
 
@@ -1021,11 +1099,14 @@ def process_workflow_event(device, message: dict) -> None:
             return
         if station_status.get("activeSource") == "inductive_sensor" and message.get("source") == "camera_clear":
             return
+        forfeited = detection_id in hand_cancelled_ids
         if active_id:
             send(device, {"command": "platform_empty", "detectionId": active_id})
             publish({"type": "platform_empty", "detectionId": active_id})
             coordinator.clear()
             station_status["activeSource"] = None
+            if forfeited:
+                station_status.update(handCancellation=False, handNotice=None, acceptingItems=True)
         set_workflow("IDLE")
     elif event_name == "inductive_detected":
         update_sensor_interlock(metal=True)
@@ -1043,7 +1124,7 @@ def process_workflow_event(device, message: dict) -> None:
 
 
 def main(simulate: bool = False) -> None:
-    global SIMULATION_MODE, active_model
+    global SIMULATION_MODE, active_model, hand_monitor, hand_device
     SIMULATION_MODE = simulate or SIMULATION_MODE
     station_status["simulation"] = SIMULATION_MODE
     load_point_rates()
@@ -1063,7 +1144,15 @@ def main(simulate: bool = False) -> None:
             from ultralytics import YOLO
             if not MODEL_PATH.exists():
                 raise FileNotFoundError(f"YOLO model not found: {MODEL_PATH}")
-            model = YOLO(str(MODEL_PATH))
+            hand_path = Path(os.getenv("TQ_HAND_MODEL_PATH", str(ROOT / "Hands Detection" / "best.onnx")))
+            if not hand_path.is_absolute(): hand_path = ROOT / hand_path
+            if not hand_path.exists(): raise FileNotFoundError(f"Hand model not found: {hand_path}")
+            hand_model = YOLO(str(hand_path), task="detect")
+            # Expand the platform ROI slightly so entering fingers are considered.
+            x1, y1, x2, y2 = PLATFORM_ROI
+            hand_monitor = HandMonitor((max(0, x1-.08), max(0, y1-.08), min(1, x2+.08), min(1, y2+.08)))
+            threading.Thread(target=hand_monitor.run, args=(hand_model, camera_stop), daemon=True).start()
+            model = YOLO(str(MODEL_PATH), task="detect")
             active_model = model
             camera = cv2.VideoCapture(CAMERA_INDEX, cv2.CAP_DSHOW)
             if not camera.isOpened():
@@ -1075,6 +1164,8 @@ def main(simulate: bool = False) -> None:
             camera_thread.start()
             threading.Thread(target=vision_loop, args=(model,), daemon=True).start()
             device = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.25, write_timeout=1)
+            hand_device = device
+            threading.Thread(target=hand_watchdog, daemon=True).start()
             time.sleep(2)
             station_status.update(online=True, serial=True, camera=True, lastError=None)
             threading.Thread(target=serial_reader, args=(device,), daemon=True).start()

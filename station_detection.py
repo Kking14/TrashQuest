@@ -150,9 +150,9 @@ class MetalCountTracker:
                     ambiguous = True
         self.samples.append((now, len(boxes), ambiguous))
 
-    def stable_count(self, now, since, window=1.5):
+    def stable_count(self, now, since, window=3.0):
         samples = [sample for sample in self.samples if max(since, now - window) <= sample[0] <= now]
-        if (len(samples) < 3 or samples[-1][0] < now - 0.75
+        if (len(samples) < 3 or samples[-1][0] < now - 1.0
                 or samples[-1][0] - samples[0][0] < 0.5):
             return None
         counts = {count for _, count, ambiguous in samples if not ambiguous}
